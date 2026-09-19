@@ -380,9 +380,9 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     p.drawText(QRect(91, 35, 38, 10), Qt::AlignCenter, diskText_);
 
     if (!logo_.isNull()) {
-        const QRect logoRect(119, 1, 22, 22);
+        const QRect logoRect(127, 2, 14, 14);
         p.save();
-        p.setOpacity(1.0);
+        p.setOpacity(opacityPercent_ / 100.0);
         p.drawPixmap(logoRect, logo_, logo_.rect());
         p.restore();
     }
