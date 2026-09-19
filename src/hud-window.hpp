@@ -4,6 +4,7 @@
 
 #include <QElapsedTimer>
 #include <QPixmap>
+#include <QString>
 #include <QTimer>
 #include <QWidget>
 
@@ -15,6 +16,14 @@ public:
     explicit ClatashaHudWindow(QWidget *parent = nullptr);
     ~ClatashaHudWindow() override;
 
+    int opacityPercent() const { return opacityPercent_; }
+    QString location() const { return location_; }
+
+    void setOpacityPercent(int value);
+    void setLocation(const QString &location);
+    void positionHud();
+    void saveSettings() const;
+
 protected:
     void paintEvent(QPaintEvent *event) override;
 
@@ -23,8 +32,11 @@ private:
     void refreshAudioSources();
     void attachDesktopSource(obs_source_t *source);
     void attachMicSource(obs_source_t *source);
+    void loadSettings();
+    void loadLogo();
     QString recordingPath() const;
     QString diskSpaceText() const;
+    QString settingsFilePath() const;
 
     static QString formatElapsed(qint64 milliseconds);
     static float meterValue(const float peak[MAX_AUDIO_CHANNELS]);
@@ -60,4 +72,6 @@ private:
 
     int spinnerAngle_ = 0;
     int audioRefreshTicks_ = 0;
+    int opacityPercent_ = 50;
+    QString location_ = QStringLiteral("top-right");
 };
