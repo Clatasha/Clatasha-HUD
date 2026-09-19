@@ -2,10 +2,14 @@
 
 #include <atomic>
 
+#include <QByteArray>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QPixmap>
+#include <QProcess>
 #include <QString>
 #include <QTimer>
+#include <QVector>
 #include <QWidget>
 
 #include <obs.h>
@@ -34,6 +38,13 @@ private:
     void attachMicSource(obs_source_t *source);
     void loadSettings();
     void loadLogo();
+    void updateForegroundGame();
+    void startPresentMon(quint32 pid);
+    void stopPresentMon();
+    void readPresentMonOutput();
+    void processPresentMonLine(const QByteArray &line);
+    void updateGameFps();
+    void resetGameFps();
     QString recordingPath() const;
     QString diskSpaceText() const;
     QString settingsFilePath() const;
@@ -49,8 +60,17 @@ private:
                                 const float peak[MAX_AUDIO_CHANNELS],
                                 const float inputPeak[MAX_AUDIO_CHANNELS]);
 
+    struct FpsChainSamples {
+        QVector<double> intervalsMs;
+        qint64 lastSeenMs = 0;
+    };
+
     QTimer refreshTimer_;
     QElapsedTimer sessionTimer_;
+    QElapsedTimer gameFpsClock_;
+    QProcess *presentMonProcess_ = nullptr;
+    QByteArray presentMonBuffer_;
+    QHash<QString, FpsChainSamples> fpsChains_;
 
     obs_volmeter_t *desktopMeter_ = nullptr;
     obs_volmeter_t *micMeter_ = nullptr;
@@ -66,7 +86,13 @@ private:
     bool recordingActive_ = false;
     bool streamingActive_ = false;
 
-    double fps_ = 0.0;
+    double obsFps_ = 0.0;
+    double gameFps_ = 0.0;
+    bool gameFpsValid_ = false;
+    quint32 trackedGamePid_ = 0;
+    int swapChainColumn_ = -1;
+    int betweenPresentsColumn_ = -1;
+    int gameTargetRefreshTicks_ = 0;
     QString timerText_ = QStringLiteral("0:00:00");
     QString diskText_ = QStringLiteral("-- GB");
 

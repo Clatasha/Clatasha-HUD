@@ -16,9 +16,15 @@
 #include <QGuiApplication>
 #include <QPainter>
 #include <QPainterPath>
+#include <QProcess>
 #include <QScreen>
 #include <QSettings>
 #include <QStorageInfo>
+#include <QStringList>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 namespace {
 constexpr int kHudWidth = 143;
@@ -59,6 +65,28 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
     loadLogo();
     setWindowOpacity(1.0);
 
+    gameFpsClock_.start();
+    presentMonProcess_ = new QProcess(this);
+#ifdef Q_OS_WIN
+    presentMonProcess_->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *args) {
+        args->flags |= CREATE_NO_WINDOW;
+    });
+#endif
+    connect(presentMonProcess_, &QProcess::readyReadStandardOutput, this, [this]() {
+        readPresentMonOutput();
+    });
+    connect(presentMonProcess_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+        gameFpsValid_ = false;
+    });
+    connect(presentMonProcess_,
+            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this,
+            [this](int, QProcess::ExitStatus) {
+                if (trackedGamePid_ != 0)
+                    trackedGamePid_ = 0;
+                gameFpsValid_ = false;
+            });
+
     desktopMeter_ = obs_volmeter_create(OBS_FADER_LOG);
     micMeter_ = obs_volmeter_create(OBS_FADER_LOG);
 
@@ -78,6 +106,8 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
 
 ClatashaHudWindow::~ClatashaHudWindow()
 {
+    stopPresentMon();
+
     if (desktopMeter_) {
         obs_volmeter_remove_callback(desktopMeter_, desktopMeterUpdated, this);
         obs_volmeter_detach_source(desktopMeter_);
@@ -146,6 +176,236 @@ void ClatashaHudWindow::loadLogo()
     blog(loaded ? LOG_INFO : LOG_ERROR,
          "[Clatasha HUD] Embedded logo %s",
          loaded ? "loaded" : "failed to load");
+}
+
+
+void ClatashaHudWindow::resetGameFps()
+{
+    presentMonBuffer_.clear();
+    fpsChains_.clear();
+    swapChainColumn_ = -1;
+    betweenPresentsColumn_ = -1;
+    gameFps_ = 0.0;
+    gameFpsValid_ = false;
+}
+
+void ClatashaHudWindow::stopPresentMon()
+{
+    if (!presentMonProcess_)
+        return;
+
+    if (presentMonProcess_->state() != QProcess::NotRunning) {
+        presentMonProcess_->kill();
+        presentMonProcess_->waitForFinished(250);
+    }
+
+    resetGameFps();
+}
+
+void ClatashaHudWindow::startPresentMon(quint32 pid)
+{
+    if (!presentMonProcess_ || pid == 0)
+        return;
+
+    stopPresentMon();
+    trackedGamePid_ = pid;
+
+    char *modulePath = obs_module_file("PresentMon-2.5.1-x64.exe");
+    if (!modulePath) {
+        blog(LOG_WARNING, "[Clatasha HUD] PresentMon executable path unavailable");
+        return;
+    }
+
+    const QString executable = QString::fromUtf8(modulePath);
+    bfree(modulePath);
+
+    if (!QFileInfo::exists(executable)) {
+        blog(LOG_WARNING, "[Clatasha HUD] PresentMon executable not found: %s",
+             executable.toUtf8().constData());
+        return;
+    }
+
+    QStringList args{
+        QStringLiteral("--process_id"),
+        QString::number(pid),
+        QStringLiteral("--output_stdout"),
+        QStringLiteral("--no_console_stats"),
+        QStringLiteral("--no_track_gpu"),
+        QStringLiteral("--no_track_input"),
+        QStringLiteral("--no_track_display"),
+        QStringLiteral("--session_name"),
+        QStringLiteral("ClatashaHUD"),
+        QStringLiteral("--stop_existing_session"),
+        QStringLiteral("--terminate_on_proc_exit"),
+    };
+
+    presentMonProcess_->setProgram(executable);
+    presentMonProcess_->setArguments(args);
+    presentMonProcess_->setProcessChannelMode(QProcess::SeparateChannels);
+    presentMonProcess_->start();
+
+    blog(LOG_INFO, "[Clatasha HUD] Tracking foreground process PID %u with PresentMon", pid);
+}
+
+void ClatashaHudWindow::updateForegroundGame()
+{
+#ifdef Q_OS_WIN
+    HWND foreground = GetForegroundWindow();
+    if (!foreground)
+        return;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(foreground, &pid);
+
+    if (pid == 0 || pid == GetCurrentProcessId()) {
+        if (trackedGamePid_ != 0) {
+            stopPresentMon();
+            trackedGamePid_ = 0;
+        }
+        return;
+    }
+
+    if (trackedGamePid_ != static_cast<quint32>(pid))
+        startPresentMon(static_cast<quint32>(pid));
+#endif
+}
+
+static QStringList splitCsvFields(const QString &line)
+{
+    QStringList fields;
+    QString current;
+    bool quoted = false;
+
+    for (int i = 0; i < line.size(); ++i) {
+        const QChar ch = line.at(i);
+
+        if (ch == QLatin1Char('"')) {
+            if (quoted && i + 1 < line.size() && line.at(i + 1) == QLatin1Char('"')) {
+                current += QLatin1Char('"');
+                ++i;
+            } else {
+                quoted = !quoted;
+            }
+        } else if (ch == QLatin1Char(',') && !quoted) {
+            fields.push_back(current);
+            current.clear();
+        } else {
+            current += ch;
+        }
+    }
+
+    fields.push_back(current);
+    return fields;
+}
+
+void ClatashaHudWindow::processPresentMonLine(const QByteArray &rawLine)
+{
+    QString line = QString::fromUtf8(rawLine).trimmed();
+    if (line.isEmpty())
+        return;
+
+    if (!line.isEmpty() && line.front() == QChar(0xFEFF))
+        line.remove(0, 1);
+
+    const QStringList fields = splitCsvFields(line);
+
+    if (swapChainColumn_ < 0 || betweenPresentsColumn_ < 0) {
+        const int swapIndex = fields.indexOf(QStringLiteral("SwapChainAddress"));
+        const int intervalIndex = fields.indexOf(QStringLiteral("MsBetweenPresents"));
+
+        if (swapIndex >= 0 && intervalIndex >= 0) {
+            swapChainColumn_ = swapIndex;
+            betweenPresentsColumn_ = intervalIndex;
+            blog(LOG_INFO, "[Clatasha HUD] PresentMon CSV stream connected");
+        }
+        return;
+    }
+
+    const int needed = std::max(swapChainColumn_, betweenPresentsColumn_);
+    if (fields.size() <= needed)
+        return;
+
+    bool ok = false;
+    const double intervalMs = fields.at(betweenPresentsColumn_).toDouble(&ok);
+    if (!ok || intervalMs <= 0.05 || intervalMs > 1000.0)
+        return;
+
+    const QString swapChain = fields.at(swapChainColumn_);
+    auto &samples = fpsChains_[swapChain];
+    samples.intervalsMs.push_back(intervalMs);
+    samples.lastSeenMs = gameFpsClock_.elapsed();
+
+    if (samples.intervalsMs.size() > 240)
+        samples.intervalsMs.remove(0, samples.intervalsMs.size() - 240);
+}
+
+void ClatashaHudWindow::readPresentMonOutput()
+{
+    if (!presentMonProcess_)
+        return;
+
+    presentMonBuffer_.append(presentMonProcess_->readAllStandardOutput());
+
+    int newline = -1;
+    while ((newline = presentMonBuffer_.indexOf('\n')) >= 0) {
+        const QByteArray line = presentMonBuffer_.left(newline);
+        presentMonBuffer_.remove(0, newline + 1);
+        processPresentMonLine(line);
+    }
+}
+
+void ClatashaHudWindow::updateGameFps()
+{
+    const qint64 now = gameFpsClock_.elapsed();
+    double bestFps = 0.0;
+    int bestRecentSamples = 0;
+
+    for (auto it = fpsChains_.begin(); it != fpsChains_.end();) {
+        if (now - it->lastSeenMs > 3000) {
+            it = fpsChains_.erase(it);
+            continue;
+        }
+
+        if (now - it->lastSeenMs > 1200) {
+            ++it;
+            continue;
+        }
+
+        const auto &intervals = it->intervalsMs;
+        if (intervals.size() < 2) {
+            ++it;
+            continue;
+        }
+
+        double totalMs = 0.0;
+        int samplesUsed = 0;
+
+        for (int i = intervals.size() - 1; i >= 0; --i) {
+            totalMs += intervals.at(i);
+            ++samplesUsed;
+
+            if (totalMs >= 500.0 && samplesUsed >= 4)
+                break;
+        }
+
+        if (samplesUsed >= 2 && totalMs > 0.0) {
+            const double fps = (1000.0 * samplesUsed) / totalMs;
+            if (samplesUsed > bestRecentSamples) {
+                bestRecentSamples = samplesUsed;
+                bestFps = fps;
+            }
+        }
+
+        ++it;
+    }
+
+    if (bestRecentSamples > 0 && std::isfinite(bestFps) && bestFps > 0.0) {
+        gameFps_ = bestFps;
+        gameFpsValid_ = true;
+    } else {
+        gameFps_ = 0.0;
+        gameFpsValid_ = false;
+    }
 }
 
 void ClatashaHudWindow::setOpacityPercent(int value)
@@ -321,8 +581,14 @@ void ClatashaHudWindow::refresh()
                      ? formatElapsed(sessionTimer_.elapsed())
                      : QStringLiteral("0:00:00");
 
-    fps_ = obs_get_active_fps();
+    obsFps_ = obs_get_active_fps();
     spinnerAngle_ = sessionActive ? (spinnerAngle_ + 20) % 360 : 0;
+
+    if (++gameTargetRefreshTicks_ >= 5) {
+        gameTargetRefreshTicks_ = 0;
+        updateForegroundGame();
+    }
+    updateGameFps();
 
     if (++audioRefreshTicks_ >= 20) {
         audioRefreshTicks_ = 0;
@@ -350,16 +616,25 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     drawSegmentedMeter(p, 5, 8, 3, 32, desktopLevel_.load(std::memory_order_relaxed));
     drawSegmentedMeter(p, 11, 8, 3, 32, micLevel_.load(std::memory_order_relaxed));
 
-    p.setPen(QColor(232, 24, 43));
-    p.setFont(QFont(QStringLiteral("Segoe UI"), 19, QFont::Bold));
-    p.drawText(QRect(18, 0, 52, 29), Qt::AlignCenter,
-               QString::number(static_cast<int>(std::lround(fps_))));
+    const bool sessionActive = recordingActive_ || streamingActive_;
+    const QColor gameFpsColor = sessionActive ? QColor(232, 24, 43) : QColor(45, 143, 255);
+    const QString gameFpsText = gameFpsValid_
+                                    ? QString::number(static_cast<int>(std::lround(gameFps_)))
+                                    : QStringLiteral("--");
+    const QString obsFpsText =
+        QStringLiteral("/%1").arg(static_cast<int>(std::lround(obsFps_)));
+
+    p.setPen(gameFpsColor);
+    p.setFont(QFont(QStringLiteral("Segoe UI"), 17, QFont::Bold));
+    p.drawText(QRect(17, 0, 43, 28), Qt::AlignRight | Qt::AlignVCenter, gameFpsText);
+
+    p.setPen(QColor(165, 171, 176));
+    p.setFont(QFont(QStringLiteral("Segoe UI"), 10, QFont::DemiBold));
+    p.drawText(QRect(60, 3, 32, 23), Qt::AlignLeft | Qt::AlignVCenter, obsFpsText);
 
     p.setPen(QColor(205, 209, 212));
-    p.setFont(QFont(QStringLiteral("Segoe UI"), 7, QFont::Normal));
-    p.drawText(QRect(27, 27, 61, 13), Qt::AlignCenter, timerText_);
-
-    const bool sessionActive = recordingActive_ || streamingActive_;
+    p.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::Normal));
+    p.drawText(QRect(23, 27, 67, 14), Qt::AlignCenter, timerText_);
     const QPointF spinnerCenter(104.0, 23.0);
     const QRectF spinnerRect(spinnerCenter.x() - 10.0, spinnerCenter.y() - 10.0, 20.0, 20.0);
 
@@ -376,8 +651,8 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     }
 
     p.setPen(QColor(165, 171, 176));
-    p.setFont(QFont(QStringLiteral("Segoe UI"), 6, QFont::Normal));
-    p.drawText(QRect(91, 35, 38, 10), Qt::AlignCenter, diskText_);
+    p.setFont(QFont(QStringLiteral("Segoe UI"), 7, QFont::Normal));
+    p.drawText(QRect(90, 34, 38, 12), Qt::AlignCenter, diskText_);
 
     if (!logo_.isNull()) {
         const QRect logoRect(127, 2, 14, 14);
