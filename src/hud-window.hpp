@@ -5,13 +5,9 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QHash>
-#include <QLocalServer>
-#include <QLocalSocket>
 #include <QPixmap>
-#include <QProcess>
 #include <QString>
 #include <QTimer>
-#include <QVector>
 #include <QWidget>
 
 #include <obs.h>
@@ -41,14 +37,11 @@ private:
     void loadSettings();
     void loadLogo();
     void updateForegroundGame();
-    void startPresentMon(quint32 pid);
-    void startElevatedPresentMon(quint32 pid);
-    void stopPresentMon();
-    void readPresentMonOutput();
-    void readPresentMonPipe();
-    void processPresentMonLine(const QByteArray &line);
-    void updateGameFps();
+    void startFpsHelper();
+    void stopFpsHelper();
+    void readFpsState();
     void resetGameFps();
+    QString fpsStateFilePath() const;
     QString recordingPath() const;
     QString diskSpaceText() const;
     QString settingsFilePath() const;
@@ -64,20 +57,12 @@ private:
                                 const float peak[MAX_AUDIO_CHANNELS],
                                 const float inputPeak[MAX_AUDIO_CHANNELS]);
 
-    struct FpsChainSamples {
-        QVector<double> captureTimesMs;
-        qint64 lastSeenMs = 0;
-    };
-
     QTimer refreshTimer_;
     QElapsedTimer sessionTimer_;
     QElapsedTimer gameFpsClock_;
-    QProcess *presentMonProcess_ = nullptr;
-    QLocalServer *presentMonPipeServer_ = nullptr;
-    QLocalSocket *presentMonPipeSocket_ = nullptr;
-    QByteArray presentMonBuffer_;
-    QByteArray presentMonErrorBuffer_;
-    QHash<QString, FpsChainSamples> fpsChains_;
+    quintptr fpsHelperHandle_ = 0;
+    bool fpsHelperStarted_ = false;
+    qint64 lastFpsStateMtimeMs_ = 0;
 
     obs_volmeter_t *desktopMeter_ = nullptr;
     obs_volmeter_t *micMeter_ = nullptr;
@@ -96,17 +81,9 @@ private:
     double obsFps_ = 0.0;
     double gameFps_ = 0.0;
     bool gameFpsValid_ = false;
-    bool presentMonAccessDenied_ = false;
-    bool elevatedPresentMonStarted_ = false;
-    bool stoppingPresentMon_ = false;
-    quintptr elevatedPresentMonHandle_ = 0;
     quint32 trackedGamePid_ = 0;
-    int processIdColumn_ = -1;
-    int swapChainColumn_ = -1;
-    int cpuStartTimeColumn_ = -1;
-    double captureTimeScale_ = 1.0;
-    int parsedFrameLogCount_ = 0;
     int gameTargetRefreshTicks_ = 0;
+    int fpsStateRefreshTicks_ = 0;
     QString timerText_ = QStringLiteral("0:00:00");
     QString diskText_ = QStringLiteral("-- GB");
 

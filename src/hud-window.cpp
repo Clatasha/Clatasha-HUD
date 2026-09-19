@@ -10,20 +10,16 @@
 #include <cstring>
 
 #include <QByteArray>
-#include <QCoreApplication>
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
-#include <QLocalServer>
-#include <QLocalSocket>
 #include <QPainter>
 #include <QPainterPath>
-#include <QProcess>
 #include <QScreen>
 #include <QSettings>
 #include <QStorageInfo>
-#include <QStringList>
 
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -72,66 +68,7 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
     setWindowOpacity(1.0);
 
     gameFpsClock_.start();
-    presentMonProcess_ = new QProcess(this);
-    presentMonPipeServer_ = new QLocalServer(this);
-#ifdef Q_OS_WIN
-    presentMonProcess_->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *args) {
-        args->flags |= CREATE_NO_WINDOW;
-    });
-#endif
-    connect(presentMonProcess_, &QProcess::readyReadStandardOutput, this, [this]() {
-        readPresentMonOutput();
-    });
-    connect(presentMonProcess_, &QProcess::readyReadStandardError, this, [this]() {
-        const QByteArray chunk = presentMonProcess_->readAllStandardError();
-        presentMonErrorBuffer_.append(chunk);
-
-        const QByteArray lower = presentMonErrorBuffer_.toLower();
-        if (lower.contains("administrative privileges") ||
-            lower.contains("performance log users") ||
-            lower.contains("access denied")) {
-            presentMonAccessDenied_ = true;
-        }
-
-        if (!chunk.isEmpty())
-            blog(LOG_WARNING, "[Clatasha HUD] PresentMon: %s", chunk.constData());
-    });
-    connect(presentMonProcess_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
-        gameFpsValid_ = false;
-    });
-    connect(presentMonProcess_,
-            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this,
-            [this](int, QProcess::ExitStatus) {
-                gameFpsValid_ = false;
-                if (!stoppingPresentMon_ && presentMonAccessDenied_ &&
-                    trackedGamePid_ != 0 && !elevatedPresentMonStarted_) {
-                    QTimer::singleShot(0, this, [this]() {
-                        startElevatedPresentMon(trackedGamePid_);
-                    });
-                }
-            });
-
-    connect(presentMonPipeServer_, &QLocalServer::newConnection, this, [this]() {
-        if (presentMonPipeSocket_) {
-            presentMonPipeSocket_->disconnect(this);
-            presentMonPipeSocket_->deleteLater();
-            presentMonPipeSocket_ = nullptr;
-        }
-
-        presentMonPipeSocket_ = presentMonPipeServer_->nextPendingConnection();
-        if (!presentMonPipeSocket_)
-            return;
-
-        connect(presentMonPipeSocket_, &QLocalSocket::readyRead, this, [this]() {
-            readPresentMonPipe();
-        });
-        connect(presentMonPipeSocket_, &QLocalSocket::disconnected, this, [this]() {
-            gameFpsValid_ = false;
-        });
-
-        readPresentMonPipe();
-    });
+    startFpsHelper();
 
     desktopMeter_ = obs_volmeter_create(OBS_FADER_LOG);
     micMeter_ = obs_volmeter_create(OBS_FADER_LOG);
@@ -152,7 +89,7 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
 
 ClatashaHudWindow::~ClatashaHudWindow()
 {
-    stopPresentMon();
+    stopFpsHelper();
 
     if (desktopMeter_) {
         obs_volmeter_remove_callback(desktopMeter_, desktopMeterUpdated, this);
@@ -227,142 +164,71 @@ void ClatashaHudWindow::loadLogo()
 
 void ClatashaHudWindow::resetGameFps()
 {
-    presentMonBuffer_.clear();
-    presentMonErrorBuffer_.clear();
-    fpsChains_.clear();
-    processIdColumn_ = -1;
-    swapChainColumn_ = -1;
-    cpuStartTimeColumn_ = -1;
-    captureTimeScale_ = 1.0;
-    parsedFrameLogCount_ = 0;
     gameFps_ = 0.0;
     gameFpsValid_ = false;
 }
 
-void ClatashaHudWindow::stopPresentMon()
+QString ClatashaHudWindow::fpsStateFilePath() const
 {
-    stoppingPresentMon_ = true;
+    char *path = obs_module_config_path("fps-state.csv");
+    if (!path)
+        return {};
 
-    if (presentMonProcess_ && presentMonProcess_->state() != QProcess::NotRunning) {
-        presentMonProcess_->kill();
-        presentMonProcess_->waitForFinished(250);
-    }
+    const QString result = QString::fromUtf8(path);
+    bfree(path);
+    return result;
+}
 
-    if (presentMonPipeSocket_) {
-        presentMonPipeSocket_->disconnect(this);
-        presentMonPipeSocket_->abort();
-        presentMonPipeSocket_->deleteLater();
-        presentMonPipeSocket_ = nullptr;
-    }
-
-    if (presentMonPipeServer_ && presentMonPipeServer_->isListening()) {
-        const QString name = presentMonPipeServer_->serverName();
-        presentMonPipeServer_->close();
-        QLocalServer::removeServer(name);
-    }
-
+void ClatashaHudWindow::stopFpsHelper()
+{
 #ifdef Q_OS_WIN
-    if (elevatedPresentMonHandle_ != 0) {
-        CloseHandle(reinterpret_cast<HANDLE>(elevatedPresentMonHandle_));
-        elevatedPresentMonHandle_ = 0;
+    if (fpsHelperHandle_ != 0) {
+        HANDLE process = reinterpret_cast<HANDLE>(fpsHelperHandle_);
+        if (WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
+            TerminateProcess(process, 0);
+            WaitForSingleObject(process, 1000);
+        }
+        CloseHandle(process);
+        fpsHelperHandle_ = 0;
     }
 #endif
-
-    presentMonAccessDenied_ = false;
-    elevatedPresentMonStarted_ = false;
+    fpsHelperStarted_ = false;
     resetGameFps();
-    stoppingPresentMon_ = false;
 }
 
-void ClatashaHudWindow::startPresentMon(quint32)
-{
-    if (!presentMonProcess_)
-        return;
-
-    if (presentMonProcess_->state() != QProcess::NotRunning || elevatedPresentMonStarted_)
-        return;
-
-    resetGameFps();
-    presentMonAccessDenied_ = false;
-
-    char *modulePath = obs_module_file("PresentMon-2.5.1-x64.exe");
-    if (!modulePath) {
-        blog(LOG_WARNING, "[Clatasha HUD] PresentMon executable path unavailable");
-        return;
-    }
-
-    const QString executable = QString::fromUtf8(modulePath);
-    bfree(modulePath);
-
-    if (!QFileInfo::exists(executable)) {
-        blog(LOG_WARNING, "[Clatasha HUD] PresentMon executable not found: %s",
-             executable.toUtf8().constData());
-        return;
-    }
-
-    QStringList args{
-        QStringLiteral("--output_stdout"),
-        QStringLiteral("--no_console_stats"),
-        QStringLiteral("--no_track_gpu"),
-        QStringLiteral("--no_track_input"),
-        QStringLiteral("--exclude_dropped"),
-        QStringLiteral("--no_track_display"),
-        QStringLiteral("--session_name"),
-        QStringLiteral("ClatashaHUD_%1").arg(QCoreApplication::applicationPid()),
-        QStringLiteral("--stop_existing_session"),
-    };
-
-    presentMonProcess_->setProgram(executable);
-    presentMonProcess_->setArguments(args);
-    presentMonProcess_->setProcessChannelMode(QProcess::SeparateChannels);
-    presentMonProcess_->start();
-
-    blog(LOG_INFO, "[Clatasha HUD] Started global PresentMon collector");
-}
-
-void ClatashaHudWindow::startElevatedPresentMon(quint32)
+void ClatashaHudWindow::startFpsHelper()
 {
 #ifdef Q_OS_WIN
-    if (!presentMonPipeServer_ || elevatedPresentMonStarted_)
+    if (fpsHelperStarted_)
         return;
 
-    char *presentMonPathRaw = obs_module_file("PresentMon-2.5.1-x64.exe");
     char *helperPathRaw = obs_module_file("clatasha-fps-helper.exe");
-
-    if (!presentMonPathRaw || !helperPathRaw) {
-        if (presentMonPathRaw)
-            bfree(presentMonPathRaw);
-        if (helperPathRaw)
-            bfree(helperPathRaw);
-        blog(LOG_WARNING, "[Clatasha HUD] FPS helper or PresentMon path unavailable");
+    if (!helperPathRaw) {
+        blog(LOG_WARNING, "[Clatasha HUD] FPS helper path unavailable");
         return;
     }
 
-    const QString presentMonPath = QString::fromUtf8(presentMonPathRaw);
     const QString helperPath = QString::fromUtf8(helperPathRaw);
-    bfree(presentMonPathRaw);
     bfree(helperPathRaw);
 
-    if (!QFileInfo::exists(presentMonPath) || !QFileInfo::exists(helperPath)) {
-        blog(LOG_WARNING, "[Clatasha HUD] FPS helper or PresentMon executable missing");
+    if (!QFileInfo::exists(helperPath)) {
+        blog(LOG_WARNING, "[Clatasha HUD] FPS helper executable missing: %s",
+             helperPath.toUtf8().constData());
         return;
     }
 
-    const QString serverName =
-        QStringLiteral("ClatashaHUD_%1").arg(GetCurrentProcessId());
-
-    QLocalServer::removeServer(serverName);
-    if (!presentMonPipeServer_->listen(serverName)) {
-        blog(LOG_WARNING, "[Clatasha HUD] Could not create PresentMon pipe: %s",
-             presentMonPipeServer_->errorString().toUtf8().constData());
+    const QString statePath = fpsStateFilePath();
+    if (statePath.isEmpty()) {
+        blog(LOG_WARNING, "[Clatasha HUD] FPS state path unavailable");
         return;
     }
 
-    const QString pipePath = presentMonPipeServer_->fullServerName();
+    QDir().mkpath(QFileInfo(statePath).absolutePath());
+    QFile::remove(statePath);
+
     const QString parameters =
-        QStringLiteral("\"%1\" \"%2\" %3")
-            .arg(QDir::toNativeSeparators(presentMonPath))
-            .arg(pipePath)
+        QStringLiteral("\"%1\" %2")
+            .arg(QDir::toNativeSeparators(statePath))
             .arg(GetCurrentProcessId());
 
     const std::wstring helperWide = QDir::toNativeSeparators(helperPath).toStdWString();
@@ -377,20 +243,13 @@ void ClatashaHudWindow::startElevatedPresentMon(quint32)
     info.nShow = SW_HIDE;
 
     if (!ShellExecuteExW(&info)) {
-        const DWORD error = GetLastError();
-        blog(LOG_WARNING, "[Clatasha HUD] Elevated FPS helper launch failed: %lu", error);
-        presentMonPipeServer_->close();
-        QLocalServer::removeServer(serverName);
+        blog(LOG_WARNING, "[Clatasha HUD] FPS helper launch failed: %lu", GetLastError());
         return;
     }
 
-    elevatedPresentMonHandle_ = reinterpret_cast<quintptr>(info.hProcess);
-    elevatedPresentMonStarted_ = true;
-    resetGameFps();
-
-    blog(LOG_INFO, "[Clatasha HUD] Elevated FPS helper started");
-#else
-    Q_UNUSED(pid);
+    fpsHelperHandle_ = reinterpret_cast<quintptr>(info.hProcess);
+    fpsHelperStarted_ = true;
+    blog(LOG_INFO, "[Clatasha HUD] Direct ETW FPS helper started");
 #endif
 }
 
@@ -408,247 +267,82 @@ void ClatashaHudWindow::updateForegroundGame()
         return;
 
     const quint32 newPid = static_cast<quint32>(pid);
-    if (trackedGamePid_ != newPid) {
-        trackedGamePid_ = newPid;
-        fpsChains_.clear();
-        gameFps_ = 0.0;
-        gameFpsValid_ = false;
+    if (trackedGamePid_ == newPid)
+        return;
 
-        wchar_t imagePath[MAX_PATH] = {};
-        QString processName;
-        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (process) {
-            DWORD size = MAX_PATH;
-            if (QueryFullProcessImageNameW(process, 0, imagePath, &size))
-                processName = QFileInfo(QString::fromWCharArray(imagePath)).fileName();
-            CloseHandle(process);
-        }
+    trackedGamePid_ = newPid;
+    resetGameFps();
 
-        if (processName.isEmpty()) {
-            blog(LOG_INFO, "[Clatasha HUD] FPS target PID %u", newPid);
-        } else {
-            blog(LOG_INFO, "[Clatasha HUD] FPS target PID %u (%s)",
-                 newPid, processName.toUtf8().constData());
-        }
+    wchar_t imagePath[MAX_PATH] = {};
+    QString processName;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (process) {
+        DWORD size = MAX_PATH;
+        if (QueryFullProcessImageNameW(process, 0, imagePath, &size))
+            processName = QFileInfo(QString::fromWCharArray(imagePath)).fileName();
+        CloseHandle(process);
     }
 
-    if (presentMonProcess_ &&
-        presentMonProcess_->state() == QProcess::NotRunning &&
-        !elevatedPresentMonStarted_) {
-        startPresentMon(0);
+    if (processName.isEmpty()) {
+        blog(LOG_INFO, "[Clatasha HUD] FPS target PID %u", newPid);
+    } else {
+        blog(LOG_INFO, "[Clatasha HUD] FPS target PID %u (%s)",
+             newPid, processName.toUtf8().constData());
     }
 #endif
 }
 
-
-static QStringList splitCsvFields(const QString &line)
+void ClatashaHudWindow::readFpsState()
 {
-    QStringList fields;
-    QString current;
-    bool quoted = false;
-
-    for (int i = 0; i < line.size(); ++i) {
-        const QChar ch = line.at(i);
-
-        if (ch == QLatin1Char('"')) {
-            if (quoted && i + 1 < line.size() && line.at(i + 1) == QLatin1Char('"')) {
-                current += QLatin1Char('"');
-                ++i;
-            } else {
-                quoted = !quoted;
-            }
-        } else if (ch == QLatin1Char(',') && !quoted) {
-            fields.push_back(current);
-            current.clear();
-        } else {
-            current += ch;
-        }
-    }
-
-    fields.push_back(current);
-    return fields;
-}
-
-void ClatashaHudWindow::processPresentMonLine(const QByteArray &rawLine)
-{
-    QString line = QString::fromUtf8(rawLine).trimmed();
-    if (line.isEmpty())
+    const QString path = fpsStateFilePath();
+    if (path.isEmpty())
         return;
 
-    if (!line.isEmpty() && line.front() == QChar(0xFEFF))
-        line.remove(0, 1);
-
-    const QStringList fields = splitCsvFields(line);
-
-    if (processIdColumn_ < 0) {
-        int processIndex = -1;
-        int swapIndex = -1;
-        int timeIndex = -1;
-        double timeScale = 1.0;
-        QString timeName;
-
-        for (int i = 0; i < fields.size(); ++i) {
-            const QString name = fields.at(i).trimmed();
-
-            if (name.compare(QStringLiteral("ProcessID"), Qt::CaseInsensitive) == 0) {
-                processIndex = i;
-            } else if (name.compare(QStringLiteral("SwapChainAddress"), Qt::CaseInsensitive) == 0) {
-                swapIndex = i;
-            } else if (name.compare(QStringLiteral("CPUStartTime"), Qt::CaseInsensitive) == 0 ||
-                       name.compare(QStringLiteral("CPUStartTimeInMs"), Qt::CaseInsensitive) == 0 ||
-                       name.compare(QStringLiteral("CPUStartQPCTime"), Qt::CaseInsensitive) == 0 ||
-                       name.compare(QStringLiteral("TimeInMs"), Qt::CaseInsensitive) == 0) {
-                timeIndex = i;
-                timeScale = 1.0;
-                timeName = name;
-            } else if (name.compare(QStringLiteral("CPUStartTimeInSeconds"), Qt::CaseInsensitive) == 0 ||
-                       name.compare(QStringLiteral("TimeInSeconds"), Qt::CaseInsensitive) == 0) {
-                timeIndex = i;
-                timeScale = 1000.0;
-                timeName = name;
-            }
-        }
-
-        if (processIndex >= 0) {
-            processIdColumn_ = processIndex;
-            swapChainColumn_ = swapIndex;
-            cpuStartTimeColumn_ = timeIndex;
-            captureTimeScale_ = timeScale;
-
-            blog(LOG_INFO,
-                 "[Clatasha HUD] PresentMon CSV header detected: pid=%d swap=%d time=%d (%s)",
-                 processIdColumn_,
-                 swapChainColumn_,
-                 cpuStartTimeColumn_,
-                 timeName.isEmpty() ? "arrival-time fallback" : timeName.toUtf8().constData());
-        } else if (line.contains(QStringLiteral("Application"), Qt::CaseInsensitive)) {
-            blog(LOG_WARNING,
-                 "[Clatasha HUD] PresentMon CSV header missing ProcessID: %s",
-                 line.left(400).toUtf8().constData());
-        }
+    QFileInfo info(path);
+    if (!info.exists()) {
+        gameFpsValid_ = false;
         return;
     }
 
-    if (fields.size() <= processIdColumn_)
+    const qint64 modified = info.lastModified().toMSecsSinceEpoch();
+    if (modified == lastFpsStateMtimeMs_ && gameFpsValid_)
         return;
 
-    bool pidOk = false;
-    const quint32 rowPid = fields.at(processIdColumn_).toUInt(&pidOk);
-    if (!pidOk || rowPid == 0)
+    lastFpsStateMtimeMs_ = modified;
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        gameFpsValid_ = false;
         return;
-
-    double captureTimeMs = static_cast<double>(gameFpsClock_.elapsed());
-    if (cpuStartTimeColumn_ >= 0 && fields.size() > cpuStartTimeColumn_) {
-        bool timeOk = false;
-        const double parsed = fields.at(cpuStartTimeColumn_).toDouble(&timeOk);
-        if (timeOk && std::isfinite(parsed))
-            captureTimeMs = parsed * captureTimeScale_;
     }
 
-    QString swapChain = QStringLiteral("default");
-    if (swapChainColumn_ >= 0 && fields.size() > swapChainColumn_) {
-        const QString parsedSwap = fields.at(swapChainColumn_).trimmed();
-        if (!parsedSwap.isEmpty())
-            swapChain = parsedSwap;
-    }
-
-    if (rowPid != trackedGamePid_)
-        return;
-
-    auto &samples = fpsChains_[swapChain];
-    if (!samples.captureTimesMs.isEmpty()) {
-        const double last = samples.captureTimesMs.back();
-
-        if (captureTimeMs < last) {
-            samples.captureTimesMs.clear();
-        } else if (captureTimeMs == last) {
-            samples.lastSeenMs = gameFpsClock_.elapsed();
-            return;
-        }
-    }
-
-    samples.captureTimesMs.push_back(captureTimeMs);
-    samples.lastSeenMs = gameFpsClock_.elapsed();
-
-    const double cutoff = captureTimeMs - 1000.0;
-    while (samples.captureTimesMs.size() > 2 &&
-           samples.captureTimesMs.front() < cutoff) {
-        samples.captureTimesMs.removeFirst();
-    }
-
-    if (parsedFrameLogCount_ < 3) {
-        blog(LOG_INFO,
-             "[Clatasha HUD] Parsed game frame: pid=%u swap=%s time=%.3f",
-             rowPid,
-             swapChain.toUtf8().constData(),
-             captureTimeMs);
-        ++parsedFrameLogCount_;
-    }
-}
-
-void ClatashaHudWindow::readPresentMonOutput()
-{
-    if (!presentMonProcess_)
-        return;
-
-    presentMonBuffer_.append(presentMonProcess_->readAllStandardOutput());
-
-    int newline = -1;
-    while ((newline = presentMonBuffer_.indexOf('\n')) >= 0) {
-        const QByteArray line = presentMonBuffer_.left(newline);
-        presentMonBuffer_.remove(0, newline + 1);
-        processPresentMonLine(line);
-    }
-}
-
-void ClatashaHudWindow::readPresentMonPipe()
-{
-    if (!presentMonPipeSocket_)
-        return;
-
-    presentMonBuffer_.append(presentMonPipeSocket_->readAll());
-
-    int newline = -1;
-    while ((newline = presentMonBuffer_.indexOf('\n')) >= 0) {
-        const QByteArray line = presentMonBuffer_.left(newline);
-        presentMonBuffer_.remove(0, newline + 1);
-        processPresentMonLine(line);
-    }
-}
-
-void ClatashaHudWindow::updateGameFps()
-{
-    const qint64 now = gameFpsClock_.elapsed();
-    double bestFps = 0.0;
     bool found = false;
+    double fps = 0.0;
 
-    for (auto it = fpsChains_.begin(); it != fpsChains_.end();) {
-        if (now - it->lastSeenMs > 5000) {
-            it = fpsChains_.erase(it);
+    while (!file.atEnd()) {
+        const QByteArray line = file.readLine().trimmed();
+        if (line.isEmpty() || line.startsWith('#'))
             continue;
+
+        const QList<QByteArray> fields = line.split(',');
+        if (fields.size() != 2)
+            continue;
+
+        bool pidOk = false;
+        bool fpsOk = false;
+        const quint32 pid = fields.at(0).toUInt(&pidOk);
+        const double value = fields.at(1).toDouble(&fpsOk);
+
+        if (pidOk && fpsOk && pid == trackedGamePid_ &&
+            std::isfinite(value) && value > 0.0 && value < 2000.0) {
+            fps = value;
+            found = true;
+            break;
         }
-
-        const auto &times = it->captureTimesMs;
-        if (now - it->lastSeenMs <= 2500 && times.size() >= 3) {
-            const double spanMs = times.back() - times.front();
-
-            if (spanMs >= 120.0) {
-                const double fps =
-                    (static_cast<double>(times.size()) - 1.0) * 1000.0 / spanMs;
-
-                if (std::isfinite(fps) && fps > 0.0 && fps < 2000.0 &&
-                    (!found || fps > bestFps)) {
-                    bestFps = fps;
-                    found = true;
-                }
-            }
-        }
-
-        ++it;
     }
 
     if (found) {
-        gameFps_ = bestFps;
+        gameFps_ = fps;
         gameFpsValid_ = true;
     } else {
         gameFps_ = 0.0;
@@ -836,16 +530,25 @@ void ClatashaHudWindow::refresh()
         gameTargetRefreshTicks_ = 0;
         updateForegroundGame();
     }
-    updateGameFps();
+
+    if (++fpsStateRefreshTicks_ >= 2) {
+        fpsStateRefreshTicks_ = 0;
+        readFpsState();
+    }
 
     static int fpsDiagnosticTicks = 0;
     if (++fpsDiagnosticTicks >= 50) {
         fpsDiagnosticTicks = 0;
+        bool helperAlive = false;
+#ifdef Q_OS_WIN
+        if (fpsHelperHandle_ != 0)
+            helperAlive =
+                WaitForSingleObject(reinterpret_cast<HANDLE>(fpsHelperHandle_), 0) == WAIT_TIMEOUT;
+#endif
         blog(LOG_INFO,
-             "[Clatasha HUD] FPS status: target_pid=%u collector=%s elevated=%s fps=%s",
+             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s",
              trackedGamePid_,
-             presentMonProcess_ && presentMonProcess_->state() != QProcess::NotRunning ? "running" : "stopped",
-             elevatedPresentMonStarted_ ? "yes" : "no",
+             helperAlive ? "running" : "stopped",
              gameFpsValid_ ? QString::number(gameFps_, 'f', 1).toUtf8().constData() : "--");
     }
 
