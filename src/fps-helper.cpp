@@ -83,7 +83,7 @@ int wmain(int argc, wchar_t **argv)
 
     std::wstring command =
         quoteArg(presentMonPath) +
-        L" --output_stdout --no_console_stats --no_track_gpu --no_track_input --no_track_display" +
+        L" --output_stdout --no_console_stats --no_track_gpu --no_track_input --exclude_dropped --no_track_display" +
         L" --session_name " + session +
         L" --stop_existing_session";
 
