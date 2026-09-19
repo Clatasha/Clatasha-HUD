@@ -19,8 +19,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
 find_package(obs-frontend-api REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Core)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Core Network)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets Qt6::Network)
 
 set_target_properties(
   ${CMAKE_PROJECT_NAME}
