@@ -14,6 +14,8 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QPainter>
 #include <QPainterPath>
 #include <QProcess>
@@ -30,8 +32,8 @@
 #endif
 
 namespace {
-constexpr int kHudWidth = 143;
-constexpr int kHudHeight = 48;
+constexpr int kHudWidth = 145;
+constexpr int kHudHeight = 50;
 constexpr int kScreenMargin = 12;
 
 const char kLogoBase64[] =
@@ -70,6 +72,7 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
 
     gameFpsClock_.start();
     presentMonProcess_ = new QProcess(this);
+    presentMonPipeServer_ = new QLocalServer(this);
 #ifdef Q_OS_WIN
     presentMonProcess_->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *args) {
         args->flags |= CREATE_NO_WINDOW;
@@ -78,6 +81,20 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
     connect(presentMonProcess_, &QProcess::readyReadStandardOutput, this, [this]() {
         readPresentMonOutput();
     });
+    connect(presentMonProcess_, &QProcess::readyReadStandardError, this, [this]() {
+        const QByteArray chunk = presentMonProcess_->readAllStandardError();
+        presentMonErrorBuffer_.append(chunk);
+
+        const QByteArray lower = presentMonErrorBuffer_.toLower();
+        if (lower.contains("administrative privileges") ||
+            lower.contains("performance log users") ||
+            lower.contains("access denied")) {
+            presentMonAccessDenied_ = true;
+        }
+
+        if (!chunk.isEmpty())
+            blog(LOG_WARNING, "[Clatasha HUD] PresentMon: %s", chunk.constData());
+    });
     connect(presentMonProcess_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
         gameFpsValid_ = false;
     });
@@ -85,10 +102,35 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
             QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this,
             [this](int, QProcess::ExitStatus) {
-                if (trackedGamePid_ != 0)
-                    trackedGamePid_ = 0;
                 gameFpsValid_ = false;
+                if (!stoppingPresentMon_ && presentMonAccessDenied_ &&
+                    trackedGamePid_ != 0 && !elevatedPresentMonStarted_) {
+                    QTimer::singleShot(0, this, [this]() {
+                        startElevatedPresentMon(trackedGamePid_);
+                    });
+                }
             });
+
+    connect(presentMonPipeServer_, &QLocalServer::newConnection, this, [this]() {
+        if (presentMonPipeSocket_) {
+            presentMonPipeSocket_->disconnect(this);
+            presentMonPipeSocket_->deleteLater();
+            presentMonPipeSocket_ = nullptr;
+        }
+
+        presentMonPipeSocket_ = presentMonPipeServer_->nextPendingConnection();
+        if (!presentMonPipeSocket_)
+            return;
+
+        connect(presentMonPipeSocket_, &QLocalSocket::readyRead, this, [this]() {
+            readPresentMonPipe();
+        });
+        connect(presentMonPipeSocket_, &QLocalSocket::disconnected, this, [this]() {
+            gameFpsValid_ = false;
+        });
+
+        readPresentMonPipe();
+    });
 
     desktopMeter_ = obs_volmeter_create(OBS_FADER_LOG);
     micMeter_ = obs_volmeter_create(OBS_FADER_LOG);
@@ -185,6 +227,7 @@ void ClatashaHudWindow::loadLogo()
 void ClatashaHudWindow::resetGameFps()
 {
     presentMonBuffer_.clear();
+    presentMonErrorBuffer_.clear();
     fpsChains_.clear();
     swapChainColumn_ = -1;
     betweenPresentsColumn_ = -1;
@@ -192,17 +235,59 @@ void ClatashaHudWindow::resetGameFps()
     gameFpsValid_ = false;
 }
 
+bool ClatashaHudWindow::processIsRunning(quint32 pid) const
+{
+#ifdef Q_OS_WIN
+    if (pid == 0)
+        return false;
+
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process)
+        return false;
+
+    DWORD exitCode = 0;
+    const bool running = GetExitCodeProcess(process, &exitCode) && exitCode == STILL_ACTIVE;
+    CloseHandle(process);
+    return running;
+#else
+    Q_UNUSED(pid);
+    return false;
+#endif
+}
+
 void ClatashaHudWindow::stopPresentMon()
 {
-    if (!presentMonProcess_)
-        return;
+    stoppingPresentMon_ = true;
 
-    if (presentMonProcess_->state() != QProcess::NotRunning) {
+    if (presentMonProcess_ && presentMonProcess_->state() != QProcess::NotRunning) {
         presentMonProcess_->kill();
         presentMonProcess_->waitForFinished(250);
     }
 
+    if (presentMonPipeSocket_) {
+        presentMonPipeSocket_->disconnect(this);
+        presentMonPipeSocket_->abort();
+        presentMonPipeSocket_->deleteLater();
+        presentMonPipeSocket_ = nullptr;
+    }
+
+    if (presentMonPipeServer_ && presentMonPipeServer_->isListening()) {
+        const QString name = presentMonPipeServer_->serverName();
+        presentMonPipeServer_->close();
+        QLocalServer::removeServer(name);
+    }
+
+#ifdef Q_OS_WIN
+    if (elevatedPresentMonHandle_ != 0) {
+        CloseHandle(reinterpret_cast<HANDLE>(elevatedPresentMonHandle_));
+        elevatedPresentMonHandle_ = 0;
+    }
+#endif
+
+    presentMonAccessDenied_ = false;
+    elevatedPresentMonStarted_ = false;
     resetGameFps();
+    stoppingPresentMon_ = false;
 }
 
 void ClatashaHudWindow::startPresentMon(quint32 pid)
@@ -237,7 +322,7 @@ void ClatashaHudWindow::startPresentMon(quint32 pid)
         QStringLiteral("--no_track_input"),
         QStringLiteral("--no_track_display"),
         QStringLiteral("--session_name"),
-        QStringLiteral("ClatashaHUD"),
+        QStringLiteral("ClatashaHUD_%1").arg(pid),
         QStringLiteral("--stop_existing_session"),
         QStringLiteral("--terminate_on_proc_exit"),
     };
@@ -247,12 +332,84 @@ void ClatashaHudWindow::startPresentMon(quint32 pid)
     presentMonProcess_->setProcessChannelMode(QProcess::SeparateChannels);
     presentMonProcess_->start();
 
-    blog(LOG_INFO, "[Clatasha HUD] Tracking foreground process PID %u with PresentMon", pid);
+    blog(LOG_INFO, "[Clatasha HUD] Tracking process PID %u with PresentMon", pid);
+}
+
+void ClatashaHudWindow::startElevatedPresentMon(quint32 pid)
+{
+#ifdef Q_OS_WIN
+    if (!presentMonPipeServer_ || elevatedPresentMonStarted_ || pid == 0)
+        return;
+
+    char *modulePath = obs_module_file("PresentMon-2.5.1-x64.exe");
+    if (!modulePath)
+        return;
+
+    const QString executable = QString::fromUtf8(modulePath);
+    bfree(modulePath);
+
+    if (!QFileInfo::exists(executable))
+        return;
+
+    const QString serverName =
+        QStringLiteral("ClatashaHUD_%1_%2").arg(GetCurrentProcessId()).arg(pid);
+
+    QLocalServer::removeServer(serverName);
+    if (!presentMonPipeServer_->listen(serverName)) {
+        blog(LOG_WARNING, "[Clatasha HUD] Could not create PresentMon pipe: %s",
+             presentMonPipeServer_->errorString().toUtf8().constData());
+        return;
+    }
+
+    const QString pipePath = presentMonPipeServer_->fullServerName();
+    const QString parameters =
+        QStringLiteral("--process_id %1 --output_file \"%2\" "
+                       "--no_console_stats --no_track_gpu --no_track_input --no_track_display "
+                       "--session_name ClatashaHUD_%1_elevated --stop_existing_session "
+                       "--terminate_on_proc_exit")
+            .arg(pid)
+            .arg(pipePath);
+
+    const std::wstring exeWide = QDir::toNativeSeparators(executable).toStdWString();
+    const std::wstring paramsWide = parameters.toStdWString();
+
+    SHELLEXECUTEINFOW info = {};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    info.lpVerb = L"runas";
+    info.lpFile = exeWide.c_str();
+    info.lpParameters = paramsWide.c_str();
+    info.nShow = SW_HIDE;
+
+    if (!ShellExecuteExW(&info)) {
+        const DWORD error = GetLastError();
+        blog(LOG_WARNING, "[Clatasha HUD] Elevated PresentMon launch failed: %lu", error);
+        presentMonPipeServer_->close();
+        QLocalServer::removeServer(serverName);
+        return;
+    }
+
+    elevatedPresentMonHandle_ = reinterpret_cast<quintptr>(info.hProcess);
+    elevatedPresentMonStarted_ = true;
+    resetGameFps();
+
+    blog(LOG_INFO, "[Clatasha HUD] Elevated PresentMon fallback started for PID %u", pid);
+#else
+    Q_UNUSED(pid);
+#endif
 }
 
 void ClatashaHudWindow::updateForegroundGame()
 {
 #ifdef Q_OS_WIN
+    if (trackedGamePid_ != 0 && processIsRunning(trackedGamePid_))
+        return;
+
+    if (trackedGamePid_ != 0) {
+        stopPresentMon();
+        trackedGamePid_ = 0;
+    }
+
     HWND foreground = GetForegroundWindow();
     if (!foreground)
         return;
@@ -260,18 +417,13 @@ void ClatashaHudWindow::updateForegroundGame()
     DWORD pid = 0;
     GetWindowThreadProcessId(foreground, &pid);
 
-    if (pid == 0 || pid == GetCurrentProcessId()) {
-        if (trackedGamePid_ != 0) {
-            stopPresentMon();
-            trackedGamePid_ = 0;
-        }
+    if (pid == 0 || pid == GetCurrentProcessId())
         return;
-    }
 
-    if (trackedGamePid_ != static_cast<quint32>(pid))
-        startPresentMon(static_cast<quint32>(pid));
+    startPresentMon(static_cast<quint32>(pid));
 #endif
 }
+
 
 static QStringList splitCsvFields(const QString &line)
 {
@@ -348,6 +500,21 @@ void ClatashaHudWindow::readPresentMonOutput()
         return;
 
     presentMonBuffer_.append(presentMonProcess_->readAllStandardOutput());
+
+    int newline = -1;
+    while ((newline = presentMonBuffer_.indexOf('\n')) >= 0) {
+        const QByteArray line = presentMonBuffer_.left(newline);
+        presentMonBuffer_.remove(0, newline + 1);
+        processPresentMonLine(line);
+    }
+}
+
+void ClatashaHudWindow::readPresentMonPipe()
+{
+    if (!presentMonPipeSocket_)
+        return;
+
+    presentMonBuffer_.append(presentMonPipeSocket_->readAll());
 
     int newline = -1;
     while ((newline = presentMonBuffer_.indexOf('\n')) >= 0) {
@@ -628,18 +795,19 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
         QStringLiteral("/%1").arg(static_cast<int>(std::lround(obsFps_)));
 
     p.setPen(gameFpsColor);
-    p.setFont(QFont(QStringLiteral("Segoe UI"), 17, QFont::Bold));
-    p.drawText(QRect(17, 0, 43, 28), Qt::AlignRight | Qt::AlignVCenter, gameFpsText);
+    const int gameFontSize = gameFpsText.size() >= 3 ? 21 : 24;
+    p.setFont(QFont(QStringLiteral("Segoe UI"), gameFontSize, QFont::Bold));
+    p.drawText(QRect(16, -3, 58, 36), Qt::AlignRight | Qt::AlignVCenter, gameFpsText);
 
     p.setPen(QColor(165, 171, 176));
     p.setFont(QFont(QStringLiteral("Segoe UI"), 10, QFont::DemiBold));
-    p.drawText(QRect(60, 3, 32, 23), Qt::AlignLeft | Qt::AlignVCenter, obsFpsText);
+    p.drawText(QRect(74, 4, 29, 23), Qt::AlignLeft | Qt::AlignVCenter, obsFpsText);
 
     p.setPen(QColor(205, 209, 212));
     p.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::Normal));
-    p.drawText(QRect(23, 27, 67, 14), Qt::AlignCenter, timerText_);
-    const QPointF spinnerCenter(104.0, 23.0);
-    const QRectF spinnerRect(spinnerCenter.x() - 10.0, spinnerCenter.y() - 10.0, 20.0, 20.0);
+    p.drawText(QRect(23, 29, 69, 14), Qt::AlignCenter, timerText_);
+    const QPointF spinnerCenter(110.0, 24.0);
+    const QRectF spinnerRect(spinnerCenter.x() - 9.0, spinnerCenter.y() - 9.0, 18.0, 18.0);
 
     if (sessionActive) {
         p.setPen(QPen(QColor(226, 25, 47), 2.0, Qt::SolidLine, Qt::RoundCap));
@@ -648,17 +816,17 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     } else {
         p.setPen(Qt::NoPen);
         p.setBrush(QColor(158, 164, 169));
-        p.drawEllipse(QPointF(98.0, 23.0), 1.5, 1.5);
-        p.drawEllipse(QPointF(104.0, 23.0), 1.5, 1.5);
-        p.drawEllipse(QPointF(110.0, 23.0), 1.5, 1.5);
+        p.drawEllipse(QPointF(104.0, 24.0), 1.5, 1.5);
+        p.drawEllipse(QPointF(110.0, 24.0), 1.5, 1.5);
+        p.drawEllipse(QPointF(116.0, 24.0), 1.5, 1.5);
     }
 
     p.setPen(QColor(165, 171, 176));
     p.setFont(QFont(QStringLiteral("Segoe UI"), 7, QFont::Normal));
-    p.drawText(QRect(90, 34, 38, 12), Qt::AlignCenter, diskText_);
+    p.drawText(QRect(94, 37, 38, 11), Qt::AlignCenter, diskText_);
 
     if (!logo_.isNull()) {
-        const QRect logoRect(127, 2, 14, 14);
+        const QRect logoRect(129, 2, 14, 14);
         p.save();
         p.setOpacity(opacityPercent_ / 100.0);
         p.drawPixmap(logoRect, logo_, logo_.rect());
