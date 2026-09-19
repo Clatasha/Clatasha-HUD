@@ -13,7 +13,7 @@
       "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
       "label": "Pre-Built obs-deps",
       "hashes": {
-        "windows-x64": "c8c642c1070dc31ce9a3e82f4647aaad18f105e30d4713c2de678ccf"
+        "windows-x64": "c8c642c1070dc31ce9a0f1e4cef5bb992f4bff4882255788b5da12129e85caa7"
       }
     },
     "qt6": {
