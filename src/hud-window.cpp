@@ -465,13 +465,36 @@ void ClatashaHudWindow::processPresentMonLine(const QByteArray &rawLine)
     const QStringList fields = splitCsvFields(line);
 
     if (swapChainColumn_ < 0 || betweenPresentsColumn_ < 0) {
-        const int swapIndex = fields.indexOf(QStringLiteral("SwapChainAddress"));
-        const int intervalIndex = fields.indexOf(QStringLiteral("MsBetweenPresents"));
+        int swapIndex = -1;
+        int intervalIndex = -1;
+        QString intervalName;
+
+        for (int i = 0; i < fields.size(); ++i) {
+            const QString name = fields.at(i).trimmed();
+
+            if (name.compare(QStringLiteral("SwapChainAddress"), Qt::CaseInsensitive) == 0)
+                swapIndex = i;
+
+            if (name.compare(QStringLiteral("FrameTime"), Qt::CaseInsensitive) == 0) {
+                intervalIndex = i;
+                intervalName = QStringLiteral("FrameTime");
+            } else if (intervalIndex < 0 &&
+                       name.compare(QStringLiteral("MsBetweenPresents"), Qt::CaseInsensitive) == 0) {
+                intervalIndex = i;
+                intervalName = QStringLiteral("MsBetweenPresents");
+            } else if (intervalIndex < 0 &&
+                       name.compare(QStringLiteral("MsBetweenAppStart"), Qt::CaseInsensitive) == 0) {
+                intervalIndex = i;
+                intervalName = QStringLiteral("MsBetweenAppStart");
+            }
+        }
 
         if (swapIndex >= 0 && intervalIndex >= 0) {
             swapChainColumn_ = swapIndex;
             betweenPresentsColumn_ = intervalIndex;
-            blog(LOG_INFO, "[Clatasha HUD] PresentMon CSV stream connected");
+            blog(LOG_INFO,
+                 "[Clatasha HUD] PresentMon CSV stream connected using %s",
+                 intervalName.toUtf8().constData());
         }
         return;
     }
