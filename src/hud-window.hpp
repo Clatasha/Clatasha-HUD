@@ -5,6 +5,8 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QPixmap>
 #include <QProcess>
 #include <QString>
@@ -40,8 +42,11 @@ private:
     void loadLogo();
     void updateForegroundGame();
     void startPresentMon(quint32 pid);
+    void startElevatedPresentMon(quint32 pid);
     void stopPresentMon();
     void readPresentMonOutput();
+    void readPresentMonPipe();
+    bool processIsRunning(quint32 pid) const;
     void processPresentMonLine(const QByteArray &line);
     void updateGameFps();
     void resetGameFps();
@@ -69,7 +74,10 @@ private:
     QElapsedTimer sessionTimer_;
     QElapsedTimer gameFpsClock_;
     QProcess *presentMonProcess_ = nullptr;
+    QLocalServer *presentMonPipeServer_ = nullptr;
+    QLocalSocket *presentMonPipeSocket_ = nullptr;
     QByteArray presentMonBuffer_;
+    QByteArray presentMonErrorBuffer_;
     QHash<QString, FpsChainSamples> fpsChains_;
 
     obs_volmeter_t *desktopMeter_ = nullptr;
@@ -89,6 +97,10 @@ private:
     double obsFps_ = 0.0;
     double gameFps_ = 0.0;
     bool gameFpsValid_ = false;
+    bool presentMonAccessDenied_ = false;
+    bool elevatedPresentMonStarted_ = false;
+    bool stoppingPresentMon_ = false;
+    quintptr elevatedPresentMonHandle_ = 0;
     quint32 trackedGamePid_ = 0;
     int swapChainColumn_ = -1;
     int betweenPresentsColumn_ = -1;
