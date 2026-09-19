@@ -46,7 +46,6 @@ private:
     void stopPresentMon();
     void readPresentMonOutput();
     void readPresentMonPipe();
-    bool processIsRunning(quint32 pid) const;
     void processPresentMonLine(const QByteArray &line);
     void updateGameFps();
     void resetGameFps();
@@ -102,6 +101,7 @@ private:
     bool stoppingPresentMon_ = false;
     quintptr elevatedPresentMonHandle_ = 0;
     quint32 trackedGamePid_ = 0;
+    int processIdColumn_ = -1;
     int swapChainColumn_ = -1;
     int betweenPresentsColumn_ = -1;
     int gameTargetRefreshTicks_ = 0;
