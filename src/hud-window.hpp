@@ -65,7 +65,7 @@ private:
                                 const float inputPeak[MAX_AUDIO_CHANNELS]);
 
     struct FpsChainSamples {
-        QVector<double> intervalsMs;
+        QVector<double> captureTimesMs;
         qint64 lastSeenMs = 0;
     };
 
@@ -103,7 +103,9 @@ private:
     quint32 trackedGamePid_ = 0;
     int processIdColumn_ = -1;
     int swapChainColumn_ = -1;
-    int betweenPresentsColumn_ = -1;
+    int cpuStartTimeColumn_ = -1;
+    double captureTimeScale_ = 1.0;
+    int parsedFrameLogCount_ = 0;
     int gameTargetRefreshTicks_ = 0;
     QString timerText_ = QStringLiteral("0:00:00");
     QString diskText_ = QStringLiteral("-- GB");

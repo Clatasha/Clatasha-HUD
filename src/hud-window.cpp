@@ -232,7 +232,9 @@ void ClatashaHudWindow::resetGameFps()
     fpsChains_.clear();
     processIdColumn_ = -1;
     swapChainColumn_ = -1;
-    betweenPresentsColumn_ = -1;
+    cpuStartTimeColumn_ = -1;
+    captureTimeScale_ = 1.0;
+    parsedFrameLogCount_ = 0;
     gameFps_ = 0.0;
     gameFpsValid_ = false;
 }
@@ -303,6 +305,7 @@ void ClatashaHudWindow::startPresentMon(quint32)
         QStringLiteral("--no_console_stats"),
         QStringLiteral("--no_track_gpu"),
         QStringLiteral("--no_track_input"),
+        QStringLiteral("--exclude_dropped"),
         QStringLiteral("--no_track_display"),
         QStringLiteral("--session_name"),
         QStringLiteral("ClatashaHUD_%1").arg(QCoreApplication::applicationPid()),
@@ -477,67 +480,110 @@ void ClatashaHudWindow::processPresentMonLine(const QByteArray &rawLine)
 
     const QStringList fields = splitCsvFields(line);
 
-    if (processIdColumn_ < 0 || swapChainColumn_ < 0 || betweenPresentsColumn_ < 0) {
+    if (processIdColumn_ < 0) {
         int processIndex = -1;
         int swapIndex = -1;
-        int intervalIndex = -1;
-        QString intervalName;
+        int timeIndex = -1;
+        double timeScale = 1.0;
+        QString timeName;
 
         for (int i = 0; i < fields.size(); ++i) {
             const QString name = fields.at(i).trimmed();
 
-            if (name.compare(QStringLiteral("ProcessID"), Qt::CaseInsensitive) == 0)
+            if (name.compare(QStringLiteral("ProcessID"), Qt::CaseInsensitive) == 0) {
                 processIndex = i;
-
-            if (name.compare(QStringLiteral("SwapChainAddress"), Qt::CaseInsensitive) == 0)
+            } else if (name.compare(QStringLiteral("SwapChainAddress"), Qt::CaseInsensitive) == 0) {
                 swapIndex = i;
-
-            if (name.compare(QStringLiteral("FrameTime"), Qt::CaseInsensitive) == 0) {
-                intervalIndex = i;
-                intervalName = QStringLiteral("FrameTime");
-            } else if (intervalIndex < 0 &&
-                       name.compare(QStringLiteral("MsBetweenPresents"), Qt::CaseInsensitive) == 0) {
-                intervalIndex = i;
-                intervalName = QStringLiteral("MsBetweenPresents");
-            } else if (intervalIndex < 0 &&
-                       name.compare(QStringLiteral("MsBetweenAppStart"), Qt::CaseInsensitive) == 0) {
-                intervalIndex = i;
-                intervalName = QStringLiteral("MsBetweenAppStart");
+            } else if (name.compare(QStringLiteral("CPUStartTime"), Qt::CaseInsensitive) == 0 ||
+                       name.compare(QStringLiteral("CPUStartTimeInMs"), Qt::CaseInsensitive) == 0 ||
+                       name.compare(QStringLiteral("CPUStartQPCTime"), Qt::CaseInsensitive) == 0 ||
+                       name.compare(QStringLiteral("TimeInMs"), Qt::CaseInsensitive) == 0) {
+                timeIndex = i;
+                timeScale = 1.0;
+                timeName = name;
+            } else if (name.compare(QStringLiteral("CPUStartTimeInSeconds"), Qt::CaseInsensitive) == 0 ||
+                       name.compare(QStringLiteral("TimeInSeconds"), Qt::CaseInsensitive) == 0) {
+                timeIndex = i;
+                timeScale = 1000.0;
+                timeName = name;
             }
         }
 
-        if (processIndex >= 0 && swapIndex >= 0 && intervalIndex >= 0) {
+        if (processIndex >= 0) {
             processIdColumn_ = processIndex;
             swapChainColumn_ = swapIndex;
-            betweenPresentsColumn_ = intervalIndex;
+            cpuStartTimeColumn_ = timeIndex;
+            captureTimeScale_ = timeScale;
+
             blog(LOG_INFO,
-                 "[Clatasha HUD] PresentMon CSV stream connected using %s",
-                 intervalName.toUtf8().constData());
+                 "[Clatasha HUD] PresentMon CSV header detected: pid=%d swap=%d time=%d (%s)",
+                 processIdColumn_,
+                 swapChainColumn_,
+                 cpuStartTimeColumn_,
+                 timeName.isEmpty() ? "arrival-time fallback" : timeName.toUtf8().constData());
+        } else if (line.contains(QStringLiteral("Application"), Qt::CaseInsensitive)) {
+            blog(LOG_WARNING,
+                 "[Clatasha HUD] PresentMon CSV header missing ProcessID: %s",
+                 line.left(400).toUtf8().constData());
         }
         return;
     }
 
-    const int needed = std::max(processIdColumn_, std::max(swapChainColumn_, betweenPresentsColumn_));
-    if (fields.size() <= needed)
+    if (fields.size() <= processIdColumn_)
         return;
 
     bool pidOk = false;
     const quint32 rowPid = fields.at(processIdColumn_).toUInt(&pidOk);
-    if (!pidOk || trackedGamePid_ == 0 || rowPid != trackedGamePid_)
+    if (!pidOk || rowPid == 0)
         return;
 
-    bool ok = false;
-    const double intervalMs = fields.at(betweenPresentsColumn_).toDouble(&ok);
-    if (!ok || intervalMs <= 0.05 || intervalMs > 1000.0)
+    double captureTimeMs = static_cast<double>(gameFpsClock_.elapsed());
+    if (cpuStartTimeColumn_ >= 0 && fields.size() > cpuStartTimeColumn_) {
+        bool timeOk = false;
+        const double parsed = fields.at(cpuStartTimeColumn_).toDouble(&timeOk);
+        if (timeOk && std::isfinite(parsed))
+            captureTimeMs = parsed * captureTimeScale_;
+    }
+
+    QString swapChain = QStringLiteral("default");
+    if (swapChainColumn_ >= 0 && fields.size() > swapChainColumn_) {
+        const QString parsedSwap = fields.at(swapChainColumn_).trimmed();
+        if (!parsedSwap.isEmpty())
+            swapChain = parsedSwap;
+    }
+
+    if (rowPid != trackedGamePid_)
         return;
 
-    const QString swapChain = fields.at(swapChainColumn_);
     auto &samples = fpsChains_[swapChain];
-    samples.intervalsMs.push_back(intervalMs);
+    if (!samples.captureTimesMs.isEmpty()) {
+        const double last = samples.captureTimesMs.back();
+
+        if (captureTimeMs < last) {
+            samples.captureTimesMs.clear();
+        } else if (captureTimeMs == last) {
+            samples.lastSeenMs = gameFpsClock_.elapsed();
+            return;
+        }
+    }
+
+    samples.captureTimesMs.push_back(captureTimeMs);
     samples.lastSeenMs = gameFpsClock_.elapsed();
 
-    if (samples.intervalsMs.size() > 240)
-        samples.intervalsMs.remove(0, samples.intervalsMs.size() - 240);
+    const double cutoff = captureTimeMs - 1000.0;
+    while (samples.captureTimesMs.size() > 2 &&
+           samples.captureTimesMs.front() < cutoff) {
+        samples.captureTimesMs.removeFirst();
+    }
+
+    if (parsedFrameLogCount_ < 3) {
+        blog(LOG_INFO,
+             "[Clatasha HUD] Parsed game frame: pid=%u swap=%s time=%.3f",
+             rowPid,
+             swapChain.toUtf8().constData(),
+             captureTimeMs);
+        ++parsedFrameLogCount_;
+    }
 }
 
 void ClatashaHudWindow::readPresentMonOutput()
@@ -574,48 +620,34 @@ void ClatashaHudWindow::updateGameFps()
 {
     const qint64 now = gameFpsClock_.elapsed();
     double bestFps = 0.0;
-    int bestRecentSamples = 0;
+    bool found = false;
 
     for (auto it = fpsChains_.begin(); it != fpsChains_.end();) {
-        if (now - it->lastSeenMs > 3000) {
+        if (now - it->lastSeenMs > 5000) {
             it = fpsChains_.erase(it);
             continue;
         }
 
-        if (now - it->lastSeenMs > 1200) {
-            ++it;
-            continue;
-        }
+        const auto &times = it->captureTimesMs;
+        if (now - it->lastSeenMs <= 2500 && times.size() >= 3) {
+            const double spanMs = times.back() - times.front();
 
-        const auto &intervals = it->intervalsMs;
-        if (intervals.size() < 2) {
-            ++it;
-            continue;
-        }
+            if (spanMs >= 120.0) {
+                const double fps =
+                    (static_cast<double>(times.size()) - 1.0) * 1000.0 / spanMs;
 
-        double totalMs = 0.0;
-        int samplesUsed = 0;
-
-        for (int i = intervals.size() - 1; i >= 0; --i) {
-            totalMs += intervals.at(i);
-            ++samplesUsed;
-
-            if (totalMs >= 500.0 && samplesUsed >= 4)
-                break;
-        }
-
-        if (samplesUsed >= 2 && totalMs > 0.0) {
-            const double fps = (1000.0 * samplesUsed) / totalMs;
-            if (samplesUsed > bestRecentSamples) {
-                bestRecentSamples = samplesUsed;
-                bestFps = fps;
+                if (std::isfinite(fps) && fps > 0.0 && fps < 2000.0 &&
+                    (!found || fps > bestFps)) {
+                    bestFps = fps;
+                    found = true;
+                }
             }
         }
 
         ++it;
     }
 
-    if (bestRecentSamples > 0 && std::isfinite(bestFps) && bestFps > 0.0) {
+    if (found) {
         gameFps_ = bestFps;
         gameFpsValid_ = true;
     } else {
@@ -805,6 +837,17 @@ void ClatashaHudWindow::refresh()
         updateForegroundGame();
     }
     updateGameFps();
+
+    static int fpsDiagnosticTicks = 0;
+    if (++fpsDiagnosticTicks >= 50) {
+        fpsDiagnosticTicks = 0;
+        blog(LOG_INFO,
+             "[Clatasha HUD] FPS status: target_pid=%u collector=%s elevated=%s fps=%s",
+             trackedGamePid_,
+             presentMonProcess_ && presentMonProcess_->state() != QProcess::NotRunning ? "running" : "stopped",
+             elevatedPresentMonStarted_ ? "yes" : "no",
+             gameFpsValid_ ? QString::number(gameFps_, 'f', 1).toUtf8().constData() : "--");
+    }
 
     if (++audioRefreshTicks_ >= 20) {
         audioRefreshTicks_ = 0;
