@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/clatasha">
+    <file alias="clatasha-logo.png">clatasha-logo.png</file>
+  </qresource>
+</RCC>

@@ -139,13 +139,18 @@ void ClatashaHudWindow::saveSettings() const
 
 void ClatashaHudWindow::loadLogo()
 {
-    bool loaded = false;
-    char *path = obs_module_file("clatasha-logo.png");
+    bool loaded = logo_.load(QStringLiteral(":/clatasha/clatasha-logo.png"));
 
+    if (loaded) {
+        blog(LOG_INFO, "[Clatasha HUD] Compiled logo resource loaded");
+        return;
+    }
+
+    char *path = obs_module_file("clatasha-logo.png");
     if (path) {
         loaded = logo_.load(QString::fromUtf8(path));
         blog(loaded ? LOG_INFO : LOG_WARNING,
-             "[Clatasha HUD] Logo %s: %s",
+             "[Clatasha HUD] Packaged logo %s: %s",
              loaded ? "loaded" : "failed to load",
              path);
         bfree(path);
@@ -391,7 +396,7 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     p.drawText(QRect(91, 35, 38, 10), Qt::AlignCenter, diskText_);
 
     if (!logo_.isNull()) {
-        const QRect logoRect(123, 2, 18, 18);
+        const QRect logoRect(119, 1, 22, 22);
         p.save();
         p.setOpacity(1.0);
         p.drawPixmap(logoRect, logo_, logo_.rect());

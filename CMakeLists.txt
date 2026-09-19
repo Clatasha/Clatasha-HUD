@@ -36,6 +36,7 @@ target_sources(
     src/plugin-main.cpp
     src/hud-window.cpp
     src/hud-window.hpp
+    data/clatasha-hud.qrc
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
