@@ -63,6 +63,7 @@ private:
     quintptr fpsHelperHandle_ = 0;
     bool fpsHelperStarted_ = false;
     qint64 lastFpsStateMtimeMs_ = 0;
+    qint64 lastValidGameFpsMs_ = -1;
 
     obs_volmeter_t *desktopMeter_ = nullptr;
     obs_volmeter_t *micMeter_ = nullptr;
