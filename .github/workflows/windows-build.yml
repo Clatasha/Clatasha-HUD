@@ -21,12 +21,44 @@ jobs:
       - name: Build
         run: cmake --build --preset windows-x64
 
-      - name: Package plugin
+      - name: Install staging files
         run: cmake --install build_x64 --config RelWithDebInfo --prefix package
+
+      - name: Create OBS installation package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $pluginRoot = "package/clatasha-hud"
+          $dist = "dist"
+
+          New-Item -ItemType Directory -Force "$dist/obs-plugins/64bit" | Out-Null
+          New-Item -ItemType Directory -Force "$dist/data/obs-plugins/clatasha-hud/locale" | Out-Null
+
+          Copy-Item "$pluginRoot/bin/64bit/clatasha-hud.dll" "$dist/obs-plugins/64bit/clatasha-hud.dll"
+          Copy-Item "$pluginRoot/data/clatasha-fps-helper.exe" "$dist/data/obs-plugins/clatasha-hud/clatasha-fps-helper.exe"
+          Copy-Item "$pluginRoot/data/locale/en-US.ini" "$dist/data/obs-plugins/clatasha-hud/locale/en-US.ini"
+
+          $required = @(
+            "$dist/obs-plugins/64bit/clatasha-hud.dll",
+            "$dist/data/obs-plugins/clatasha-hud/clatasha-fps-helper.exe",
+            "$dist/data/obs-plugins/clatasha-hud/locale/en-US.ini"
+          )
+
+          foreach ($file in $required) {
+            if (-not (Test-Path $file)) {
+              throw "Missing packaged file: $file"
+            }
+          }
+
+          Write-Host "Clatasha HUD OBS-root package:"
+          Get-ChildItem $dist -Recurse -File | ForEach-Object {
+            Write-Host $_.FullName
+          }
 
       - name: Upload Windows plugin
         uses: actions/upload-artifact@v4
         with:
-          name: Clatasha-HUD-Windows-x64
-          path: package/
+          name: Clatasha-HUD-Windows-x64-OBS-root
+          path: dist/
           if-no-files-found: error

@@ -28,6 +28,42 @@ Clatasha HUD is a Windows-first native OBS Studio plugin prototype for a local-o
 
 The build scaffolding is based on the official `obsproject/obs-plugintemplate`. The current official template pins OBS SDK/dependencies to OBS 31.1.1; v0.1 intentionally keeps that known-good template pin for the first compile/load test.
 
+## Windows installation
+
+The Windows release ZIP uses the conventional OBS installation-root layout used by many established OBS plugins:
+
+```text
+obs-plugins/
+  64bit/
+    clatasha-hud.dll
+data/
+  obs-plugins/
+    clatasha-hud/
+      clatasha-fps-helper.exe
+      locale/
+        en-US.ini
+```
+
+Close OBS, then extract the ZIP directly into the OBS Studio installation directory, normally:
+
+```text
+C:\\Program Files\\obs-studio
+```
+
+After extraction, the main module should be:
+
+```text
+C:\\Program Files\\obs-studio\\obs-plugins\\64bit\\clatasha-hud.dll
+```
+
+and the helper should be:
+
+```text
+C:\\Program Files\\obs-studio\\data\\obs-plugins\\clatasha-hud\\clatasha-fps-helper.exe
+```
+
+Restart OBS and use the Clatasha HUD entries under the Tools menu.
+
 ## Build
 
 ```powershell
