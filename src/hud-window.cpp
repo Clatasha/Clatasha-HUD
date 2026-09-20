@@ -601,8 +601,27 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     p.setPen(QPen(QColor(100, 109, 116, borderAlpha), 1.0));
     p.drawPath(panel);
 
-    drawSegmentedMeter(p, 5, 8, 3, 32, desktopLevel_.load(std::memory_order_relaxed));
-    drawSegmentedMeter(p, 11, 8, 3, 32, micLevel_.load(std::memory_order_relaxed));
+    drawSegmentedMeter(p, 5, 6, 3, 29, desktopLevel_.load(std::memory_order_relaxed));
+    drawSegmentedMeter(p, 11, 6, 3, 29, micLevel_.load(std::memory_order_relaxed));
+
+    // Tiny source-identification icons under the audio meters:
+    // monitor for Desktop Audio, microphone for Mic/Aux.
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(QPen(QColor(174, 181, 187), 0.9));
+    p.setBrush(Qt::NoBrush);
+
+    // Desktop monitor icon.
+    p.drawRoundedRect(QRectF(3.0, 38.0, 7.0, 5.0), 0.8, 0.8);
+    p.drawLine(QPointF(6.5, 43.0), QPointF(6.5, 45.0));
+    p.drawLine(QPointF(4.5, 45.0), QPointF(8.5, 45.0));
+
+    // Microphone icon.
+    p.drawRoundedRect(QRectF(10.0, 37.5, 4.0, 6.0), 2.0, 2.0);
+    p.drawArc(QRectF(9.0, 40.0, 6.0, 5.0), 180 * 16, 180 * 16);
+    p.drawLine(QPointF(12.0, 45.0), QPointF(12.0, 46.5));
+    p.drawLine(QPointF(10.0, 46.5), QPointF(14.0, 46.5));
+    p.restore();
 
     const bool sessionActive = recordingActive_ || streamingActive_;
     const QColor gameFpsColor = sessionActive ? QColor(232, 24, 43) : QColor(45, 143, 255);
