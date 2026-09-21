@@ -1973,8 +1973,21 @@ static void show_settings()
     dialog.setWindowTitle(QStringLiteral("Clatasha HUD Settings"));
     dialog.setWindowIcon(QIcon(QStringLiteral(":/clatasha/icons/settings.svg")));
     dialog.setModal(true);
-    dialog.resize(930, 720);
-    dialog.setMinimumSize(860, 640);
+    dialog.setWindowFlag(Qt::WindowMaximizeButtonHint, true);
+    dialog.setWindowFlag(Qt::WindowMinimizeButtonHint, true);
+    dialog.setSizeGripEnabled(true);
+    dialog.setMinimumSize(720, 520);
+
+    QScreen *settingsScreen = parent ? parent->screen() : QGuiApplication::primaryScreen();
+    const QRect availableGeometry =
+        settingsScreen ? settingsScreen->availableGeometry() : QRect(0, 0, 930, 720);
+    const int initialWidth = qMax(
+        dialog.minimumWidth(),
+        qMin(930, qMax(720, availableGeometry.width() - 40)));
+    const int initialHeight = qMax(
+        dialog.minimumHeight(),
+        qMin(720, qMax(520, availableGeometry.height() - 40)));
+    dialog.resize(initialWidth, initialHeight);
 
     auto *pages = new QStackedWidget(&dialog);
 
@@ -2239,6 +2252,18 @@ static void show_settings()
     hotkeysLayout->addWidget(hotkeysTitle);
     hotkeysLayout->addWidget(hotkeysSubtitle);
 
+    auto *hotkeysScroll = new QScrollArea(hotkeysPage);
+    hotkeysScroll->setWidgetResizable(true);
+    hotkeysScroll->setFrameShape(QFrame::NoFrame);
+    hotkeysScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    auto *hotkeysScrollBody = new QWidget(hotkeysScroll);
+    auto *hotkeysCardsLayout = new QVBoxLayout(hotkeysScrollBody);
+    hotkeysCardsLayout->setContentsMargins(0, 4, 6, 4);
+    hotkeysCardsLayout->setSpacing(10);
+    hotkeysScroll->setWidget(hotkeysScrollBody);
+    hotkeysLayout->addWidget(hotkeysScroll, 1);
+
     std::array<HotkeyCaptureEdit *, kHudHotkeyCount> hotkeyEdits{};
     std::array<bool, kHudHotkeyCount> hotkeyDirty{};
 
@@ -2250,14 +2275,14 @@ static void show_settings()
     for (int i = 0; i < kHudHotkeyCount; ++i) {
         const QString groupName = QString::fromUtf8(g_hudHotkeys[i].group);
         if (groupName != lastGroup) {
-            currentHotkeyGroup = new QGroupBox(groupName, hotkeysPage);
+            currentHotkeyGroup = new QGroupBox(groupName, hotkeysScrollBody);
             currentHotkeyGrid = new QGridLayout(currentHotkeyGroup);
             currentHotkeyGrid->setContentsMargins(14, 20, 14, 14);
             currentHotkeyGrid->setHorizontalSpacing(8);
             currentHotkeyGrid->setVerticalSpacing(8);
             currentHotkeyGrid->setColumnStretch(0, 1);
             currentHotkeyRow = 0;
-            hotkeysLayout->addWidget(currentHotkeyGroup);
+            hotkeysCardsLayout->addWidget(currentHotkeyGroup);
             lastGroup = groupName;
         }
 
@@ -2296,11 +2321,11 @@ static void show_settings()
         QStringLiteral(
             "No shortcuts are assigned by default. Click Change and press a shortcut. "
             "Delete or Backspace clears the selected binding."),
-        hotkeysPage);
+        hotkeysScrollBody);
     hotkeyNote->setWordWrap(true);
     hotkeyNote->setProperty("accentNote", true);
-    hotkeysLayout->addWidget(hotkeyNote);
-    hotkeysLayout->addStretch();
+    hotkeysCardsLayout->addWidget(hotkeyNote);
+    hotkeysCardsLayout->addStretch();
 
     auto *advancedPage = makeInfoPage(
         QStringLiteral("Advanced"),
