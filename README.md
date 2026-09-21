@@ -1,36 +1,79 @@
+<p align="center">
+  <img src="assets/clatasha-hud-logo.png" width="180" alt="Clatasha HUD logo">
+</p>
+
 # Clatasha HUD
 
-Clatasha HUD is a Windows-first native OBS Studio plugin prototype for a local-only gaming HUD.
+Clatasha HUD is a Windows OBS Studio plugin that adds a compact, always-on-top status HUD for the streamer and a five-slot browser overlay manager for HUD-only, stream-only, or combined overlays.
 
-## v0.1 proof of concept
+The plugin runs inside OBS Studio. It does not require a separate Python process.
 
-- Loads inside OBS Studio. No Python process is required.
-- Adds `Tools > Clatasha HUD` to toggle the HUD.
-- Creates a frameless, always-on-top, click-through Qt HUD.
-- Shows OBS recording and streaming state with session timers.
-- Starts and stops with OBS.
+## Current features
 
-## Planned next steps
+### Compact local HUD
 
-1. Windows capture exclusion so OBS recordings/streams do not contain the HUD.
-2. OBS render FPS, bitrate, CPU and dropped-frame statistics.
-3. Real-time microphone and desktop-audio meters.
-4. HUD position, opacity, scale and enable/disable settings.
-5. Warning states such as muted microphone or stopped recording.
-6. Optional true game-FPS integration later.
+- 145 × 50 frameless, always-on-top, click-through HUD.
+- Actual foreground game/application FPS through the Clatasha DXGI ETW helper.
+- OBS renderer FPS shown beside the game FPS.
+- Game FPS is blue while idle and red while recording or streaming.
+- Desktop Audio and Mic/Aux segmented level meters with separate monitor and microphone icons.
+- Recording/streaming session timer.
+- Recording-drive free-space display.
+- Recording/streaming activity spinner.
+- Adjustable HUD opacity and corner placement.
+- Windows capture-exclusion request for local HUD windows where supported.
 
-## Build requirements
+If game FPS cannot be read, Clatasha HUD displays `--` rather than substituting OBS renderer FPS.
 
-- Windows 10/11 x64
-- Visual Studio 2022 with **Desktop development with C++**
-- CMake 3.28 or newer
-- Git
+## Browser Overlays
 
-The build scaffolding is based on the official `obsproject/obs-plugintemplate`. The current official template pins OBS SDK/dependencies to OBS 31.1.1; v0.1 intentionally keeps that known-good template pin for the first compile/load test.
+Clatasha HUD includes five configurable overlay slots. Each slot has:
+
+- Enable/disable control.
+- Friendly name.
+- URL or local-file input.
+- `HUD`, `VIDEO`, or `HUD / VIDEO` output mode.
+- Preview/Edit placement tool with drag and resize handles.
+- Saved HUD and VIDEO placement.
+- Apply confirmation toast.
+
+### Supported overlay inputs
+
+Remote browser widgets such as Streamlabs alert boxes can be pasted directly into a slot.
+
+Direct image URLs are automatically placed on a transparent canvas instead of Chromium's built-in image-viewer background. Supported image types include PNG, APNG, GIF, WebP, SVG, JPG/JPEG, BMP, and AVIF.
+
+Local files can be selected with **Browse Local…**. Local transparent images use the same alpha-preserving path as remote images. Local HTML/HTM files use OBS Browser Source local-file mode.
+
+### Output modes
+
+- **HUD** — shown locally as a desktop HUD overlay.
+- **VIDEO** — created as a Clatasha-managed OBS Browser Source in the current scene.
+- **HUD / VIDEO** — shown in both places.
+
+HUD browser overlays render through an off-screen OBS `browser_source` so transparent alert widgets stay invisible until they actually draw content.
+
+## Game FPS backend
+
+Game/application FPS is collected by `clatasha-fps-helper.exe` using the Windows DXGI ETW provider. The helper is launched elevated because starting the ETW session normally requires suitable Windows tracing permissions.
+
+Current limitations:
+
+- The FPS path is DXGI-focused. Vulkan/OpenGL titles may show `--`.
+- The current target is the non-OBS foreground process.
+- A UAC prompt may appear when the helper starts.
+- The game FPS display intentionally holds the last valid sample briefly to prevent flicker during short ETW/state-file gaps.
+
+## Requirements
+
+- Windows 10 or Windows 11 x64.
+- OBS Studio with Browser Source/obs-browser installed and enabled for browser overlays.
+- Current development/testing is on OBS Studio 32.2.2.
+- CI currently uses the OBS plugin-template dependency set pinned to OBS 31.1.1.
 
 ## Windows installation
 
-The Windows release ZIP uses the conventional OBS installation-root layout used by many established OBS plugins:
+The Windows ZIP uses the OBS installation-root layout:
 
 ```text
 obs-plugins/
@@ -44,37 +87,45 @@ data/
         en-US.ini
 ```
 
-Close OBS, then extract the ZIP directly into the OBS Studio installation directory, normally:
+Close OBS Studio, then extract the ZIP directly into the OBS installation directory, normally:
 
 ```text
-C:\\Program Files\\obs-studio
+C:\Program Files\obs-studio
 ```
 
-After extraction, the main module should be:
+After extraction, the main files should be:
 
 ```text
-C:\\Program Files\\obs-studio\\obs-plugins\\64bit\\clatasha-hud.dll
+C:\Program Files\obs-studio\obs-plugins\64bit\clatasha-hud.dll
+C:\Program Files\obs-studio\data\obs-plugins\clatasha-hud\clatasha-fps-helper.exe
+C:\Program Files\obs-studio\data\obs-plugins\clatasha-hud\locale\en-US.ini
 ```
 
-and the helper should be:
+Restart OBS and open the Clatasha HUD controls from the **Tools** menu.
 
-```text
-C:\\Program Files\\obs-studio\\data\\obs-plugins\\clatasha-hud\\clatasha-fps-helper.exe
-```
+## Building from source
 
-Restart OBS and use the Clatasha HUD entries under the Tools menu.
+Build requirements:
 
-## Build
+- Visual Studio 2022 with **Desktop development with C++**.
+- CMake 3.28 or newer.
+- Git.
 
 ```powershell
-git clone https://github.com/derspawn/Clatasha-HUD.git
+git clone https://github.com/Clatasha/Clatasha-HUD.git
 cd Clatasha-HUD
 cmake --preset windows-x64
 cmake --build --preset windows-x64
 ```
 
-The first configure downloads/builds the OBS development dependencies, so it takes longer than later builds.
+The first configure downloads the OBS development dependencies, so it normally takes longer than later builds.
 
-## Status
+## Privacy and overlay URLs
 
-Early prototype. Do not treat v0.1 as a finished or capture-safe HUD yet.
+Clatasha HUD stores its settings locally in the OBS plugin configuration area. The plugin does not log full browser-overlay URLs. This matters because alert-service URLs can contain private tokens.
+
+Third-party browser widgets still connect to their own service through OBS Browser Source when you configure them.
+
+## Project status
+
+Clatasha HUD is in active development. The core HUD, DXGI game-FPS backend, browser overlay manager, transparent alert rendering, direct-image handling, and local-file support are functional, but the project is still being refined through real OBS/game testing.
