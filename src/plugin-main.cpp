@@ -442,10 +442,49 @@ public:
         setMouseTracking(true);
     }
 
+    ~OverlayPreviewCanvas() override
+    {
+        if (previewBrowser_) {
+            previewBrowser_->closeBrowser();
+            previewBrowser_ = nullptr;
+        }
+    }
+
+    void setBrowserUrl(const QString &url)
+    {
+        if (url.trimmed().isEmpty())
+            return;
+
+        QCef *engine = ensureBrowserEngine();
+        if (!engine)
+            return;
+
+        if (!previewBrowser_) {
+            previewBrowser_ = engine->create_widget(this, url.toStdString(), nullptr);
+            if (!previewBrowser_) {
+                blog(LOG_WARNING, "[Clatasha HUD] Failed to create browser preview widget");
+                return;
+            }
+
+            previewBrowser_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+            previewBrowser_->setStartupScript(
+                "document.documentElement.style.background='transparent';"
+                "if(document.body)document.body.style.background='transparent';");
+            previewBrowser_->show();
+        } else if (previewUrl_ != url) {
+            previewBrowser_->setURL(url.toStdString());
+        }
+
+        previewUrl_ = url;
+        updateBrowserGeometry();
+        update();
+    }
+
     void setGeometryData(int x, int y, int width, int height)
     {
         logicalRect_ = QRect(x, y, width, height);
         clampRect();
+        updateBrowserGeometry();
         update();
     }
 
@@ -489,11 +528,13 @@ protected:
         painter.setPen(QPen(QColor(67, 159, 255), 2));
         painter.drawRect(visual);
 
-        painter.setPen(QColor(225, 232, 238));
-        painter.setFont(QFont(QStringLiteral("Segoe UI"), 10, QFont::DemiBold));
-        painter.drawText(visual.adjusted(10, 10, -10, -10),
-                         Qt::AlignCenter | Qt::TextWordWrap,
-                         label_.isEmpty() ? QStringLiteral("Browser Overlay") : label_);
+        if (!previewBrowser_) {
+            painter.setPen(QColor(225, 232, 238));
+            painter.setFont(QFont(QStringLiteral("Segoe UI"), 10, QFont::DemiBold));
+            painter.drawText(visual.adjusted(10, 10, -10, -10),
+                             Qt::AlignCenter | Qt::TextWordWrap,
+                             label_.isEmpty() ? QStringLiteral("Browser Overlay") : label_);
+        }
 
         painter.setPen(Qt::NoPen);
         painter.setBrush(QColor(230, 235, 240));
@@ -610,6 +651,12 @@ protected:
         event->accept();
     }
 
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QWidget::resizeEvent(event);
+        updateBrowserGeometry();
+    }
+
 private:
     enum class Handle {
         None,
@@ -714,6 +761,21 @@ private:
         }
     }
 
+    void updateBrowserGeometry()
+    {
+        if (!previewBrowser_)
+            return;
+
+        // Leave a small frame around the live browser so the eight resize
+        // handles stay visible and continue receiving mouse input.
+        QRect browserRect = toVisual(logicalRect_).adjusted(7, 7, -7, -7);
+        if (browserRect.width() < 1 || browserRect.height() < 1)
+            return;
+
+        previewBrowser_->setGeometry(browserRect);
+        previewBrowser_->show();
+    }
+
     void clampRect()
     {
         if (logicalRect_.width() > kCanvasWidth)
@@ -737,6 +799,8 @@ private:
     QString label_;
     Handle activeHandle_ = Handle::None;
     bool dragging_ = false;
+    QCefWidget *previewBrowser_ = nullptr;
+    QString previewUrl_;
     std::function<void(const QRect &)> changedCallback_;
 };
 
@@ -747,6 +811,12 @@ void showOverlayPreview(QWidget *parent, OverlayConfig &config)
     dialog.setModal(true);
     dialog.resize(760, 540);
 
+    auto *previewNote = new QLabel(
+        QStringLiteral("Live browser content is shown inside the blue resize frame. Drag the frame or its handles to position and resize it."),
+        &dialog);
+    previewNote->setWordWrap(true);
+    previewNote->setStyleSheet(QStringLiteral("color:#8cc5ff; padding:2px 4px 6px 4px;"));
+
     auto *modeTabs = new QTabWidget(&dialog);
     auto *hudPage = new QWidget(modeTabs);
     auto *videoPage = new QWidget(modeTabs);
@@ -754,6 +824,7 @@ void showOverlayPreview(QWidget *parent, OverlayConfig &config)
     auto buildPage = [&](QWidget *page, bool video) {
         auto *canvas = new OverlayPreviewCanvas(page);
         canvas->setLabel(config.name);
+        canvas->setBrowserUrl(config.url);
 
         const QRect initial(video ? config.videoX : config.hudX,
                             video ? config.videoY : config.hudY,
@@ -848,6 +919,7 @@ void showOverlayPreview(QWidget *parent, OverlayConfig &config)
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
 
     auto *mainLayout = new QVBoxLayout(&dialog);
+    mainLayout->addWidget(previewNote);
     mainLayout->addWidget(modeTabs, 1);
     mainLayout->addWidget(buttons);
 

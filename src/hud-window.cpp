@@ -601,8 +601,8 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     p.setPen(QPen(QColor(100, 109, 116, borderAlpha), 1.0));
     p.drawPath(panel);
 
-    drawSegmentedMeter(p, 4, 5, 3, 29, desktopLevel_.load(std::memory_order_relaxed));
-    drawSegmentedMeter(p, 13, 5, 3, 29, micLevel_.load(std::memory_order_relaxed));
+    drawSegmentedMeter(p, 3, 5, 3, 29, desktopLevel_.load(std::memory_order_relaxed));
+    drawSegmentedMeter(p, 15, 5, 3, 29, micLevel_.load(std::memory_order_relaxed));
 
     // Tiny source-identification icons under the audio meters:
     // monitor for Desktop Audio, microphone for Mic/Aux.
@@ -612,15 +612,15 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     p.setBrush(Qt::NoBrush);
 
     // Desktop monitor icon, deliberately separated from the microphone.
-    p.drawRoundedRect(QRectF(1.5, 37.5, 7.0, 5.0), 0.8, 0.8);
-    p.drawLine(QPointF(5.0, 42.5), QPointF(5.0, 44.5));
-    p.drawLine(QPointF(3.0, 44.5), QPointF(7.0, 44.5));
+    p.drawRoundedRect(QRectF(0.5, 37.5, 7.0, 5.0), 0.8, 0.8);
+    p.drawLine(QPointF(4.0, 42.5), QPointF(4.0, 44.5));
+    p.drawLine(QPointF(2.0, 44.5), QPointF(6.0, 44.5));
 
     // Microphone icon.
-    p.drawRoundedRect(QRectF(11.7, 37.2, 3.6, 5.8), 1.8, 1.8);
-    p.drawArc(QRectF(10.8, 39.6, 5.4, 4.8), 180 * 16, 180 * 16);
-    p.drawLine(QPointF(13.5, 44.3), QPointF(13.5, 46.0));
-    p.drawLine(QPointF(11.8, 46.0), QPointF(15.2, 46.0));
+    p.drawRoundedRect(QRectF(13.2, 37.2, 3.6, 5.8), 1.8, 1.8);
+    p.drawArc(QRectF(12.3, 39.6, 5.4, 4.8), 180 * 16, 180 * 16);
+    p.drawLine(QPointF(15.0, 44.3), QPointF(15.0, 46.0));
+    p.drawLine(QPointF(13.3, 46.0), QPointF(16.7, 46.0));
     p.restore();
 
     const bool sessionActive = recordingActive_ || streamingActive_;
@@ -634,7 +634,7 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     p.setPen(gameFpsColor);
     const int gameFontSize = gameFpsText.size() >= 4 ? 19 : 24;
     p.setFont(QFont(QStringLiteral("Segoe UI"), gameFontSize, QFont::Bold));
-    p.drawText(QRect(16, -3, 58, 36), Qt::AlignRight | Qt::AlignVCenter, gameFpsText);
+    p.drawText(QRect(20, -3, 54, 36), Qt::AlignRight | Qt::AlignVCenter, gameFpsText);
 
     p.setPen(QColor(165, 171, 176));
     p.setFont(QFont(QStringLiteral("Segoe UI"), 10, QFont::DemiBold));
