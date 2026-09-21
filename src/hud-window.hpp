@@ -79,6 +79,7 @@ private:
     bool sessionWasActive_ = false;
     bool recordingActive_ = false;
     bool streamingActive_ = false;
+    bool replayBufferActive_ = false;
 
     double obsFps_ = 0.0;
     double gameFps_ = 0.0;
@@ -90,6 +91,7 @@ private:
     QString diskText_ = QStringLiteral("-- GB");
 
     int spinnerAngle_ = 0;
+    int replayShimmerTicks_ = 0;
     int audioRefreshTicks_ = 0;
     int opacityPercent_ = 50;
     QString location_ = QStringLiteral("top-right");

@@ -580,6 +580,12 @@ void ClatashaHudWindow::refresh()
 {
     recordingActive_ = obs_frontend_recording_active();
     streamingActive_ = obs_frontend_streaming_active();
+    replayBufferActive_ = obs_frontend_replay_buffer_active();
+
+    if (replayBufferActive_)
+        replayShimmerTicks_ = (replayShimmerTicks_ + 1) % 1000000;
+    else
+        replayShimmerTicks_ = 0;
 
     const bool sessionActive = recordingActive_ || streamingActive_;
 
@@ -705,6 +711,43 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     p.setPen(QColor(165, 171, 176));
     p.setFont(QFont(QStringLiteral("Segoe UI"), 7, QFont::Normal));
     p.drawText(QRect(94, 37, 38, 11), Qt::AlignCenter, diskText_);
+
+    // Replay Buffer indicator. The bolt is hidden while Replay Buffer is off
+    // and uses a soft electric shimmer while it is armed.
+    if (replayBufferActive_) {
+        const double wave = (std::sin(replayShimmerTicks_ * 0.42) + 1.0) * 0.5;
+        const int glowAlpha = 28 + static_cast<int>(54.0 * wave);
+        const int boltAlpha = 190 + static_cast<int>(65.0 * wave);
+
+        p.save();
+        p.setRenderHint(QPainter::Antialiasing, true);
+
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(255, 204, 64, glowAlpha));
+        p.drawEllipse(QPointF(137.0, 29.5), 6.5 + wave, 7.0 + wave);
+
+        QPainterPath bolt;
+        bolt.moveTo(137.4, 21.0);
+        bolt.lineTo(132.7, 29.4);
+        bolt.lineTo(136.2, 29.4);
+        bolt.lineTo(134.4, 37.2);
+        bolt.lineTo(141.4, 27.1);
+        bolt.lineTo(137.8, 27.1);
+        bolt.closeSubpath();
+
+        p.setPen(QPen(QColor(255, 248, 212, boltAlpha), 0.75));
+        p.setBrush(QColor(255, 205, 55, boltAlpha));
+        p.drawPath(bolt);
+
+        // Small traveling glint makes the indicator read as shimmering rather
+        // than simply blinking.
+        const double glintY = 23.0 + std::fmod(replayShimmerTicks_ * 0.85, 10.0);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(255, 255, 255, 150 + static_cast<int>(90.0 * wave)));
+        p.drawEllipse(QPointF(138.7, glintY), 0.85, 0.85);
+
+        p.restore();
+    }
 
     if (!logo_.isNull()) {
         const QRect logoRect(127, 1, 16, 16);
