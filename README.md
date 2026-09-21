@@ -13,7 +13,7 @@ The plugin runs inside OBS Studio. It does not require a separate Python process
 
 ## Current features
 <p align="center">
-  <img src="assets/clatasha%20hud%20image2.jpg" width="360" alt="Clatasha HUD logo">
+  <img src="assets/clatasha%20hud%20image2.jpg" width="500" alt="Clatasha HUD logo">
 </p>
 ### Compact local HUD
 
@@ -31,7 +31,7 @@ The plugin runs inside OBS Studio. It does not require a separate Python process
 
 If game FPS cannot be read, Clatasha HUD displays `--` rather than substituting OBS renderer FPS.
 <p align="center">
-  <img src="assets/clatasha%20hud%20image.jpg" width="360" alt="Clatasha HUD logo">
+  <img src="assets/clatasha%20hud%20image.jpg" width="500" alt="Clatasha HUD logo">
 </p>
 ## Browser Overlays
 
