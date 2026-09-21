@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/clatasha-hud-logo.png" width="180" alt="Clatasha HUD logo">
+  <img src="assets/clatasha-hud-logo-readme.png" width="360" alt="Clatasha HUD logo">
 </p>
 
 # Clatasha HUD
