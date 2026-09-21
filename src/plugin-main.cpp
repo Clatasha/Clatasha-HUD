@@ -1,5 +1,6 @@
 #include <obs-module.h>
 #include <obs-frontend-api.h>
+#include <util/platform.h>
 
 #include <QAction>
 #include <QCheckBox>
@@ -9,6 +10,7 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -18,15 +20,29 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScreen>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <string>
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+#endif
 
 #include "hud-window.hpp"
 
@@ -61,6 +77,210 @@ struct OverlayConfig {
     int videoX = 660;
     int videoY = 40;
 };
+
+
+struct QCefCookieManager;
+
+class QCefWidget : public QWidget {
+public:
+    explicit QCefWidget(QWidget *parent = nullptr) : QWidget(parent) {}
+    virtual void setURL(const std::string &url) = 0;
+    virtual void setStartupScript(const std::string &script) = 0;
+    virtual void allowAllPopups(bool allow) = 0;
+    virtual void closeBrowser() = 0;
+    virtual void reloadPage() = 0;
+    virtual bool zoomPage(int direction) = 0;
+    virtual void executeJavaScript(const std::string &script) = 0;
+};
+
+struct QCef {
+    virtual ~QCef() = default;
+    virtual bool init_browser(void) = 0;
+    virtual bool initialized(void) = 0;
+    virtual bool wait_for_browser_init(void) = 0;
+    virtual QCefWidget *create_widget(QWidget *parent, const std::string &url,
+                                      QCefCookieManager *cookieManager = nullptr) = 0;
+};
+
+QCef *g_browserEngine = nullptr;
+
+QCef *ensureBrowserEngine()
+{
+    if (g_browserEngine)
+        return g_browserEngine;
+
+    obs_module_t *browserModule = obs_get_module("obs-browser");
+    if (!browserModule) {
+        blog(LOG_WARNING, "[Clatasha HUD] obs-browser module is unavailable for HUD overlays");
+        return nullptr;
+    }
+
+    void *library = obs_get_module_lib(browserModule);
+    if (!library) {
+        blog(LOG_WARNING, "[Clatasha HUD] obs-browser library handle is unavailable");
+        return nullptr;
+    }
+
+    using CreateQCefFn = QCef *(*)();
+    auto createQCef =
+        reinterpret_cast<CreateQCefFn>(os_dlsym(library, "obs_browser_create_qcef"));
+    if (!createQCef) {
+        blog(LOG_WARNING, "[Clatasha HUD] obs-browser QCEF interface is unavailable");
+        return nullptr;
+    }
+
+    g_browserEngine = createQCef();
+    if (!g_browserEngine)
+        return nullptr;
+
+    if (!g_browserEngine->initialized()) {
+        g_browserEngine->init_browser();
+        if (!g_browserEngine->wait_for_browser_init()) {
+            blog(LOG_WARNING, "[Clatasha HUD] Browser engine failed to initialize");
+            return nullptr;
+        }
+    }
+
+    blog(LOG_INFO, "[Clatasha HUD] Browser HUD engine initialized");
+    return g_browserEngine;
+}
+
+class BrowserHudOverlay final : public QWidget {
+public:
+    explicit BrowserHudOverlay(int index)
+        : QWidget(nullptr), index_(index)
+    {
+        setObjectName(QStringLiteral("ClatashaBrowserHUD%1").arg(index + 1));
+        setWindowTitle(QStringLiteral("Clatasha HUD Browser %1").arg(index + 1));
+        setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
+                       Qt::WindowDoesNotAcceptFocus);
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+        setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        setAttribute(Qt::WA_NativeWindow, true);
+        setWindowFlag(Qt::WindowTransparentForInput, true);
+        setStyleSheet(QStringLiteral("background: transparent;"));
+    }
+
+    ~BrowserHudOverlay() override
+    {
+        if (browser_) {
+            browser_->closeBrowser();
+            browser_ = nullptr;
+        }
+    }
+
+    bool applyConfig(const OverlayConfig &config)
+    {
+        QCef *engine = ensureBrowserEngine();
+        if (!engine)
+            return false;
+
+        const std::string url = config.url.toStdString();
+
+        if (!browser_) {
+            browser_ = engine->create_widget(this, url, nullptr);
+            if (!browser_) {
+                blog(LOG_WARNING, "[Clatasha HUD] Failed to create HUD browser widget %d", index_ + 1);
+                return false;
+            }
+
+            browser_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+            browser_->setAttribute(Qt::WA_TranslucentBackground, true);
+            browser_->setStyleSheet(QStringLiteral("background: transparent;"));
+            browser_->setStartupScript(
+                "document.documentElement.style.background='transparent';"
+                "if(document.body)document.body.style.background='transparent';");
+            browser_->show();
+        } else if (config.url != url_) {
+            browser_->setURL(url);
+        }
+
+        url_ = config.url;
+        positionFromConfig(config);
+
+        browser_->setGeometry(rect());
+        show();
+        raise();
+
+#ifdef Q_OS_WIN
+        const HWND hwnd = reinterpret_cast<HWND>(winId());
+        if (hwnd && !SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)) {
+            blog(LOG_DEBUG,
+                 "[Clatasha HUD] Capture exclusion unavailable for HUD browser %d: %lu",
+                 index_ + 1, GetLastError());
+        }
+#endif
+
+        return true;
+    }
+
+protected:
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QWidget::resizeEvent(event);
+        if (browser_)
+            browser_->setGeometry(rect());
+    }
+
+private:
+    void positionFromConfig(const OverlayConfig &config)
+    {
+        QScreen *screen = QGuiApplication::primaryScreen();
+        if (!screen)
+            return;
+
+        const QRect screenRect = screen->geometry();
+        const double sx = screenRect.width() / static_cast<double>(kCanvasWidth);
+        const double sy = screenRect.height() / static_cast<double>(kCanvasHeight);
+
+        const int x = screenRect.left() + qRound(config.hudX * sx);
+        const int y = screenRect.top() + qRound(config.hudY * sy);
+        const int width = qMax(40, qRound(config.width * sx));
+        const int height = qMax(40, qRound(config.height * sy));
+
+        setGeometry(x, y, width, height);
+    }
+
+    int index_ = 0;
+    QCefWidget *browser_ = nullptr;
+    QString url_;
+};
+
+std::array<BrowserHudOverlay *, kOverlayCount> g_hudBrowserOverlays{};
+
+bool applyHudOverlays(const std::array<OverlayConfig, kOverlayCount> &configs)
+{
+    bool browserAvailable = true;
+
+    for (int i = 0; i < kOverlayCount; ++i) {
+        const OverlayConfig &config = configs[i];
+        const bool shouldShow = config.enabled && modeHasHud(config.mode) &&
+                                !config.url.trimmed().isEmpty();
+
+        if (!shouldShow) {
+            delete g_hudBrowserOverlays[i];
+            g_hudBrowserOverlays[i] = nullptr;
+            continue;
+        }
+
+        if (!g_hudBrowserOverlays[i])
+            g_hudBrowserOverlays[i] = new BrowserHudOverlay(i);
+
+        if (!g_hudBrowserOverlays[i]->applyConfig(config))
+            browserAvailable = false;
+    }
+
+    return browserAvailable;
+}
+
+void destroyHudOverlays()
+{
+    for (BrowserHudOverlay *&overlay : g_hudBrowserOverlays) {
+        delete overlay;
+        overlay = nullptr;
+    }
+}
 
 QString settingsFilePath()
 {
@@ -765,7 +985,7 @@ static void show_settings()
     title->setFont(titleFont);
 
     auto *subtitle = new QLabel(
-        QStringLiteral("Add up to five Streamlabs or browser-widget URLs. VIDEO sends the widget to OBS; HUD placement is saved for the upcoming transparent HUD renderer."),
+        QStringLiteral("Add up to five Streamlabs or browser-widget URLs. HUD shows a private desktop overlay, VIDEO adds it to the current OBS scene, and HUD / VIDEO does both."),
         browserTab);
     subtitle->setWordWrap(true);
     subtitle->setProperty("muted", true);
@@ -843,7 +1063,7 @@ static void show_settings()
     browserLayout->addWidget(scroll, 1);
 
     auto *videoNote = new QLabel(
-        QStringLiteral("VIDEO overlays are added to the current OBS scene when you press Apply or OK."),
+        QStringLiteral("HUD overlays appear on your desktop and are excluded from Windows capture when supported. VIDEO overlays are added to the current OBS scene when you press Apply or OK."),
         browserTab);
     videoNote->setWordWrap(true);
     videoNote->setProperty("accentNote", true);
@@ -870,11 +1090,14 @@ static void show_settings()
         g_hud->saveSettings();
         saveOverlayConfigs(overlayConfigs);
 
-        if (!applyVideoOverlays(overlayConfigs)) {
+        const bool videoOk = applyVideoOverlays(overlayConfigs);
+        const bool hudOk = applyHudOverlays(overlayConfigs);
+
+        if (!videoOk || !hudOk) {
             QMessageBox::warning(
                 &dialog,
-                QStringLiteral("Browser Source Unavailable"),
-                QStringLiteral("OBS Browser Source could not be created. Make sure the OBS Browser plugin is installed and enabled."));
+                QStringLiteral("Browser Overlay Unavailable"),
+                QStringLiteral("One or more browser overlays could not be created. Make sure the OBS Browser plugin is installed and enabled."));
         }
     };
 
@@ -935,7 +1158,12 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
         ensure_hud();
         g_hud->show();
         g_hud->positionHud();
-        applyVideoOverlays(loadOverlayConfigs());
+        {
+            const auto configs = loadOverlayConfigs();
+            applyVideoOverlays(configs);
+            applyHudOverlays(configs);
+            QTimer::singleShot(1200, []() { applyHudOverlays(loadOverlayConfigs()); });
+        }
         break;
 
     case OBS_FRONTEND_EVENT_SCENE_CHANGED:
@@ -943,6 +1171,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
         break;
 
     case OBS_FRONTEND_EVENT_EXIT:
+        destroyHudOverlays();
         if (g_hud) {
             g_hud->saveSettings();
             g_hud->close();
@@ -978,6 +1207,7 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
     obs_frontend_remove_event_callback(on_frontend_event, nullptr);
+    destroyHudOverlays();
 
     if (g_toolsAction) {
         QObject::disconnect(g_toolsAction, nullptr, nullptr, nullptr);
