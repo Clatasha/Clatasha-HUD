@@ -47,6 +47,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #ifdef Q_OS_WIN
@@ -69,6 +70,7 @@ static QAction *g_toolsAction = nullptr;
 static QAction *g_settingsAction = nullptr;
 static QTimer *g_hudWatchdog = nullptr;
 static bool g_hudWantedVisible = true;
+static bool g_frontendExiting = false;
 
 namespace {
 
@@ -269,25 +271,21 @@ public:
         setAutoFillBackground(false);
 
         obs_add_tick_callback(&BrowserHudOverlay::renderTick, this);
+        tickRegistered_ = true;
     }
 
     ~BrowserHudOverlay() override
     {
-        obs_remove_tick_callback(&BrowserHudOverlay::renderTick, this);
+        releaseObsResources();
+    }
 
-        if (source_) {
-            if (sourceShowing_)
-                obs_source_dec_showing(source_);
-            obs_source_release(source_);
-            source_ = nullptr;
-        }
-
-        obs_enter_graphics();
-        gs_stagesurface_destroy(stageSurface_);
-        stageSurface_ = nullptr;
-        gs_texrender_destroy(texRender_);
-        texRender_ = nullptr;
-        obs_leave_graphics();
+    void prepareForShutdown()
+    {
+        active_.store(false, std::memory_order_release);
+        hide();
+        frame_ = QImage();
+        update();
+        releaseObsResources();
     }
 
     bool applyConfig(const OverlayConfig &config)
@@ -384,10 +382,50 @@ protected:
     }
 
 private:
+    void releaseObsResources()
+    {
+        active_.store(false, std::memory_order_release);
+
+        if (tickRegistered_) {
+            obs_remove_tick_callback(&BrowserHudOverlay::renderTick, this);
+            tickRegistered_ = false;
+        }
+
+        std::lock_guard<std::mutex> lock(renderMutex_);
+
+        if (source_) {
+            // Ask obs-browser to shut its CEF instance down while the browser
+            // module and Qt event loop are still alive, then release our ref.
+            obs_data_t *settings = obs_source_get_settings(source_);
+            if (settings) {
+                obs_data_set_bool(settings, "shutdown", true);
+                obs_source_update(source_, settings);
+                obs_data_release(settings);
+            }
+
+            if (sourceShowing_) {
+                obs_source_dec_showing(source_);
+                sourceShowing_ = false;
+            }
+
+            obs_source_release(source_);
+            source_ = nullptr;
+        }
+
+        if (stageSurface_ || texRender_) {
+            obs_enter_graphics();
+            gs_stagesurface_destroy(stageSurface_);
+            stageSurface_ = nullptr;
+            gs_texrender_destroy(texRender_);
+            texRender_ = nullptr;
+            obs_leave_graphics();
+        }
+    }
+
     static void renderTick(void *param, float seconds)
     {
         auto *self = static_cast<BrowserHudOverlay *>(param);
-        if (!self || !self->active_.load(std::memory_order_acquire) || !self->source_)
+        if (!self || !self->active_.load(std::memory_order_acquire))
             return;
 
         self->renderAccumulator_ += seconds;
@@ -404,6 +442,8 @@ private:
 
     void renderFrame()
     {
+        std::lock_guard<std::mutex> lock(renderMutex_);
+
         const int width = renderWidth_.load(std::memory_order_relaxed);
         const int height = renderHeight_.load(std::memory_order_relaxed);
 
@@ -516,6 +556,8 @@ private:
     int index_ = 0;
     obs_source_t *source_ = nullptr;
     bool sourceShowing_ = false;
+    bool tickRegistered_ = false;
+    std::mutex renderMutex_;
 
     gs_texrender_t *texRender_ = nullptr;
     gs_stagesurf_t *stageSurface_ = nullptr;
@@ -568,6 +610,14 @@ bool applyHudOverlays(const std::array<OverlayConfig, kOverlayCount> &configs)
 
 void destroyHudOverlays()
 {
+    // Two-phase teardown: release OBS/CEF resources first, while all overlay
+    // widgets are still alive, then destroy the Qt windows. This avoids
+    // re-entering CEF browser shutdown from inside QWidget destruction.
+    for (BrowserHudOverlay *overlay : g_hudBrowserOverlays) {
+        if (overlay)
+            overlay->prepareForShutdown();
+    }
+
     for (BrowserHudOverlay *&overlay : g_hudBrowserOverlays) {
         delete overlay;
         overlay = nullptr;
@@ -2068,9 +2118,9 @@ static void show_settings()
         QStringLiteral(":/clatasha/icons/general.svg"),
         false);
     auto *browserNav = addNavButton(
-        QStringLiteral("▣   Browser Overlays"),
+        QStringLiteral("Browser Overlays"),
         browserPageIndex,
-        QString(),
+        QStringLiteral(":/clatasha/icons/browser-overlays.svg"),
         false);
     auto *hudNav = addNavButton(
         QStringLiteral("HUD"),
@@ -2273,6 +2323,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
         break;
 
     case OBS_FRONTEND_EVENT_EXIT:
+        g_frontendExiting = true;
         g_hudWantedVisible = false;
         destroyHudOverlays();
         if (g_hud) {
@@ -2292,6 +2343,7 @@ bool obs_module_load(void)
 {
     blog(LOG_INFO, "[Clatasha HUD] Loading plugin");
 
+    g_frontendExiting = false;
     obs_frontend_add_event_callback(on_frontend_event, nullptr);
 
     g_toolsAction = static_cast<QAction *>(
@@ -2310,7 +2362,8 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
     g_hudWantedVisible = false;
-    obs_frontend_remove_event_callback(on_frontend_event, nullptr);
+    if (!g_frontendExiting)
+        obs_frontend_remove_event_callback(on_frontend_event, nullptr);
     destroyHudOverlays();
 
     if (g_toolsAction) {

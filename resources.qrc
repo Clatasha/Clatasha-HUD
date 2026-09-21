@@ -1,6 +1,7 @@
 <RCC>
   <qresource prefix="/clatasha">
     <file alias="icons/general.svg">assets/icons/general.svg</file>
+    <file alias="icons/browser-overlays.svg">assets/icons/browser-overlay.svg</file>
     <file alias="icons/hud.svg">assets/icons/hud2.svg</file>
     <file alias="icons/appearance.svg">assets/icons/appearance.svg</file>
     <file alias="icons/hotkeys.svg">assets/icons/hotkeys.svg</file>
