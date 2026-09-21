@@ -39,6 +39,7 @@
 #include <atomic>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <string>
 
 #ifdef Q_OS_WIN
@@ -59,6 +60,8 @@ OBS_MODULE_USE_DEFAULT_LOCALE("clatasha-hud", "en-US")
 static ClatashaHudWindow *g_hud = nullptr;
 static QAction *g_toolsAction = nullptr;
 static QAction *g_settingsAction = nullptr;
+static QTimer *g_hudWatchdog = nullptr;
+static bool g_hudWantedVisible = true;
 
 namespace {
 
@@ -76,12 +79,23 @@ struct OverlayConfig {
     QString name;
     QString url;
     OverlayMode mode = OverlayMode::Hud;
-    int width = 600;
-    int height = 300;
+
+    // Browser/source canvas. This stays fixed while placement scales the
+    // finished source, preventing resize handles from behaving like a crop.
+    int sourceWidth = 600;
+    int sourceHeight = 300;
+
     int hudX = 80;
     int hudY = 80;
+    int hudWidth = 600;
+    int hudHeight = 300;
+    bool hudLockRatio = true;
+
     int videoX = 660;
     int videoY = 40;
+    int videoWidth = 600;
+    int videoHeight = 300;
+    bool videoLockRatio = true;
 };
 
 QString localFilePathFromValue(const QString &value)
@@ -274,8 +288,8 @@ public:
         if (config.url.trimmed().isEmpty())
             return false;
 
-        const int newWidth = qBound(100, config.width, 3840);
-        const int newHeight = qBound(80, config.height, 2160);
+        const int newWidth = qBound(100, config.sourceWidth, 3840);
+        const int newHeight = qBound(80, config.sourceHeight, 2160);
 
         obs_data_t *settings = obs_data_create();
         applyBrowserInputSettings(settings, config.url);
@@ -486,8 +500,8 @@ private:
 
         const int x = screenRect.left() + qRound(config.hudX * sx);
         const int y = screenRect.top() + qRound(config.hudY * sy);
-        const int width = qMax(40, qRound(config.width * sx));
-        const int height = qMax(40, qRound(config.height * sy));
+        const int width = qMax(40, qRound(config.hudWidth * sx));
+        const int height = qMax(40, qRound(config.hudHeight * sy));
 
         setGeometry(x, y, width, height);
     }
@@ -588,16 +602,52 @@ std::array<OverlayConfig, kOverlayCount> loadOverlayConfigs()
         config.url = settings.value(prefix + QStringLiteral("url")).toString();
         config.mode = static_cast<OverlayMode>(
             qBound(0, settings.value(prefix + QStringLiteral("mode"), 0).toInt(), 2));
-        config.width = qBound(100, settings.value(prefix + QStringLiteral("width"), 600).toInt(), 3840);
-        config.height = qBound(80, settings.value(prefix + QStringLiteral("height"), 300).toInt(), 2160);
+
+        // Migration: older builds used one width/height pair for both the
+        // browser viewport and displayed size.
+        const int legacyWidth =
+            qBound(100, settings.value(prefix + QStringLiteral("width"), 600).toInt(), 3840);
+        const int legacyHeight =
+            qBound(80, settings.value(prefix + QStringLiteral("height"), 300).toInt(), 2160);
+
+        config.sourceWidth =
+            qBound(100,
+                   settings.value(prefix + QStringLiteral("sourceWidth"), legacyWidth).toInt(),
+                   3840);
+        config.sourceHeight =
+            qBound(80,
+                   settings.value(prefix + QStringLiteral("sourceHeight"), legacyHeight).toInt(),
+                   2160);
+
         config.hudX = qBound(0, settings.value(prefix + QStringLiteral("hudX"), 80).toInt(),
                              kCanvasWidth - 20);
         config.hudY = qBound(0, settings.value(prefix + QStringLiteral("hudY"), 80).toInt(),
                              kCanvasHeight - 20);
+        config.hudWidth =
+            qBound(100,
+                   settings.value(prefix + QStringLiteral("hudWidth"), legacyWidth).toInt(),
+                   kCanvasWidth);
+        config.hudHeight =
+            qBound(80,
+                   settings.value(prefix + QStringLiteral("hudHeight"), legacyHeight).toInt(),
+                   kCanvasHeight);
+        config.hudLockRatio =
+            settings.value(prefix + QStringLiteral("hudLockRatio"), true).toBool();
+
         config.videoX = qBound(0, settings.value(prefix + QStringLiteral("videoX"), 660).toInt(),
                                kCanvasWidth - 20);
         config.videoY = qBound(0, settings.value(prefix + QStringLiteral("videoY"), 40).toInt(),
                                kCanvasHeight - 20);
+        config.videoWidth =
+            qBound(100,
+                   settings.value(prefix + QStringLiteral("videoWidth"), legacyWidth).toInt(),
+                   kCanvasWidth);
+        config.videoHeight =
+            qBound(80,
+                   settings.value(prefix + QStringLiteral("videoHeight"), legacyHeight).toInt(),
+                   kCanvasHeight);
+        config.videoLockRatio =
+            settings.value(prefix + QStringLiteral("videoLockRatio"), true).toBool();
     }
 
     return configs;
@@ -619,15 +669,36 @@ void saveOverlayConfigs(const std::array<OverlayConfig, kOverlayCount> &configs)
         settings.setValue(prefix + QStringLiteral("name"), config.name);
         settings.setValue(prefix + QStringLiteral("url"), config.url);
         settings.setValue(prefix + QStringLiteral("mode"), static_cast<int>(config.mode));
-        settings.setValue(prefix + QStringLiteral("width"), config.width);
-        settings.setValue(prefix + QStringLiteral("height"), config.height);
+
+        settings.setValue(prefix + QStringLiteral("sourceWidth"), config.sourceWidth);
+        settings.setValue(prefix + QStringLiteral("sourceHeight"), config.sourceHeight);
+        // Keep the old keys as source-resolution aliases for downgrade/migration safety.
+        settings.setValue(prefix + QStringLiteral("width"), config.sourceWidth);
+        settings.setValue(prefix + QStringLiteral("height"), config.sourceHeight);
+
         settings.setValue(prefix + QStringLiteral("hudX"), config.hudX);
         settings.setValue(prefix + QStringLiteral("hudY"), config.hudY);
+        settings.setValue(prefix + QStringLiteral("hudWidth"), config.hudWidth);
+        settings.setValue(prefix + QStringLiteral("hudHeight"), config.hudHeight);
+        settings.setValue(prefix + QStringLiteral("hudLockRatio"), config.hudLockRatio);
+
         settings.setValue(prefix + QStringLiteral("videoX"), config.videoX);
         settings.setValue(prefix + QStringLiteral("videoY"), config.videoY);
+        settings.setValue(prefix + QStringLiteral("videoWidth"), config.videoWidth);
+        settings.setValue(prefix + QStringLiteral("videoHeight"), config.videoHeight);
+        settings.setValue(prefix + QStringLiteral("videoLockRatio"), config.videoLockRatio);
     }
 
     settings.sync();
+}
+
+QString overlaySizeText(const OverlayConfig &config)
+{
+    return QStringLiteral("HUD %1 × %2   ·   VIDEO %3 × %4")
+        .arg(config.hudWidth)
+        .arg(config.hudHeight)
+        .arg(config.videoWidth)
+        .arg(config.videoHeight);
 }
 
 bool modeHasVideo(OverlayMode mode)
@@ -665,8 +736,8 @@ bool applyVideoOverlays(const std::array<OverlayConfig, kOverlayCount> &configs)
 
         obs_data_t *settings = obs_data_create();
         applyBrowserInputSettings(settings, config.url);
-        obs_data_set_int(settings, "width", config.width);
-        obs_data_set_int(settings, "height", config.height);
+        obs_data_set_int(settings, "width", config.sourceWidth);
+        obs_data_set_int(settings, "height", config.sourceHeight);
         obs_data_set_int(settings, "fps", 30);
         obs_data_set_bool(settings, "shutdown", false);
         obs_data_set_bool(settings, "restart_when_active", false);
@@ -694,6 +765,13 @@ bool applyVideoOverlays(const std::array<OverlayConfig, kOverlayCount> &configs)
             pos.y = static_cast<float>(config.videoY);
             obs_sceneitem_set_pos(item, &pos);
             obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+
+            struct vec2 scale;
+            scale.x = static_cast<float>(config.videoWidth) /
+                      static_cast<float>(qMax(1, config.sourceWidth));
+            scale.y = static_cast<float>(config.videoHeight) /
+                      static_cast<float>(qMax(1, config.sourceHeight));
+            obs_sceneitem_set_scale(item, &scale);
         }
 
         obs_source_release(source);
@@ -729,6 +807,13 @@ public:
     void setChangedCallback(std::function<void(const QRect &)> callback)
     {
         changedCallback_ = std::move(callback);
+    }
+
+    void setLockRatio(bool enabled, double ratio)
+    {
+        lockRatio_ = enabled;
+        if (ratio > 0.01)
+            aspectRatio_ = ratio;
     }
 
 protected:
@@ -809,56 +894,45 @@ protected:
 
         QRect next = startRect_;
 
-        switch (activeHandle_) {
-        case Handle::Move:
+        if (activeHandle_ == Handle::Move) {
             next.translate(dx, dy);
-            break;
-        case Handle::Left:
-            next.setLeft(startRect_.left() + dx);
-            break;
-        case Handle::Right:
-            next.setRight(startRect_.right() + dx);
-            break;
-        case Handle::Top:
-            next.setTop(startRect_.top() + dy);
-            break;
-        case Handle::Bottom:
-            next.setBottom(startRect_.bottom() + dy);
-            break;
-        case Handle::TopLeft:
-            next.setTop(startRect_.top() + dy);
-            next.setLeft(startRect_.left() + dx);
-            break;
-        case Handle::TopRight:
-            next.setTop(startRect_.top() + dy);
-            next.setRight(startRect_.right() + dx);
-            break;
-        case Handle::BottomLeft:
-            next.setBottom(startRect_.bottom() + dy);
-            next.setLeft(startRect_.left() + dx);
-            break;
-        case Handle::BottomRight:
-            next.setBottom(startRect_.bottom() + dy);
-            next.setRight(startRect_.right() + dx);
-            break;
-        default:
-            break;
-        }
+        } else if (lockRatio_) {
+            next = lockedResize(dx, dy);
+        } else {
+            switch (activeHandle_) {
+            case Handle::Left:
+                next.setLeft(startRect_.left() + dx);
+                break;
+            case Handle::Right:
+                next.setRight(startRect_.right() + dx);
+                break;
+            case Handle::Top:
+                next.setTop(startRect_.top() + dy);
+                break;
+            case Handle::Bottom:
+                next.setBottom(startRect_.bottom() + dy);
+                break;
+            case Handle::TopLeft:
+                next.setTop(startRect_.top() + dy);
+                next.setLeft(startRect_.left() + dx);
+                break;
+            case Handle::TopRight:
+                next.setTop(startRect_.top() + dy);
+                next.setRight(startRect_.right() + dx);
+                break;
+            case Handle::BottomLeft:
+                next.setBottom(startRect_.bottom() + dy);
+                next.setLeft(startRect_.left() + dx);
+                break;
+            case Handle::BottomRight:
+                next.setBottom(startRect_.bottom() + dy);
+                next.setRight(startRect_.right() + dx);
+                break;
+            default:
+                break;
+            }
 
-        if (next.width() < 100) {
-            if (activeHandle_ == Handle::Left || activeHandle_ == Handle::TopLeft ||
-                activeHandle_ == Handle::BottomLeft)
-                next.setLeft(next.right() - 99);
-            else
-                next.setRight(next.left() + 99);
-        }
-
-        if (next.height() < 80) {
-            if (activeHandle_ == Handle::Top || activeHandle_ == Handle::TopLeft ||
-                activeHandle_ == Handle::TopRight)
-                next.setTop(next.bottom() - 79);
-            else
-                next.setBottom(next.top() + 79);
+            enforceMinimumSize(next);
         }
 
         logicalRect_ = next;
@@ -983,6 +1057,126 @@ private:
         }
     }
 
+    void normalizeLockedSize(int &width, int &height, bool widthPrimary) const
+    {
+        const double ratio = qMax(0.01, aspectRatio_);
+
+        if (widthPrimary) {
+            width = qMax(100, width);
+            height = qMax(80, qRound(width / ratio));
+            if (height == 80)
+                width = qMax(100, qRound(height * ratio));
+        } else {
+            height = qMax(80, height);
+            width = qMax(100, qRound(height * ratio));
+            if (width == 100)
+                height = qMax(80, qRound(width / ratio));
+        }
+
+        const double scale =
+            qMin(1.0,
+                 qMin(kCanvasWidth / static_cast<double>(qMax(1, width)),
+                      kCanvasHeight / static_cast<double>(qMax(1, height))));
+        if (scale < 1.0) {
+            width = qMax(100, qRound(width * scale));
+            height = qMax(80, qRound(width / ratio));
+        }
+    }
+
+    QRect lockedResize(int dx, int dy) const
+    {
+        const QRect s = startRect_;
+        int width = s.width();
+        int height = s.height();
+        bool widthPrimary = true;
+
+        const double relX = std::abs(dx) / static_cast<double>(qMax(1, s.width()));
+        const double relY = std::abs(dy) / static_cast<double>(qMax(1, s.height()));
+
+        switch (activeHandle_) {
+        case Handle::Left:
+            width = s.width() - dx;
+            widthPrimary = true;
+            break;
+        case Handle::Right:
+            width = s.width() + dx;
+            widthPrimary = true;
+            break;
+        case Handle::Top:
+            height = s.height() - dy;
+            widthPrimary = false;
+            break;
+        case Handle::Bottom:
+            height = s.height() + dy;
+            widthPrimary = false;
+            break;
+        case Handle::TopLeft:
+            width = s.width() - dx;
+            height = s.height() - dy;
+            widthPrimary = relX >= relY;
+            break;
+        case Handle::TopRight:
+            width = s.width() + dx;
+            height = s.height() - dy;
+            widthPrimary = relX >= relY;
+            break;
+        case Handle::BottomLeft:
+            width = s.width() - dx;
+            height = s.height() + dy;
+            widthPrimary = relX >= relY;
+            break;
+        case Handle::BottomRight:
+            width = s.width() + dx;
+            height = s.height() + dy;
+            widthPrimary = relX >= relY;
+            break;
+        default:
+            break;
+        }
+
+        normalizeLockedSize(width, height, widthPrimary);
+
+        switch (activeHandle_) {
+        case Handle::Left:
+            return QRect(s.right() - width + 1, s.center().y() - height / 2, width, height);
+        case Handle::Right:
+            return QRect(s.left(), s.center().y() - height / 2, width, height);
+        case Handle::Top:
+            return QRect(s.center().x() - width / 2, s.bottom() - height + 1, width, height);
+        case Handle::Bottom:
+            return QRect(s.center().x() - width / 2, s.top(), width, height);
+        case Handle::TopLeft:
+            return QRect(s.right() - width + 1, s.bottom() - height + 1, width, height);
+        case Handle::TopRight:
+            return QRect(s.left(), s.bottom() - height + 1, width, height);
+        case Handle::BottomLeft:
+            return QRect(s.right() - width + 1, s.top(), width, height);
+        case Handle::BottomRight:
+            return QRect(s.left(), s.top(), width, height);
+        default:
+            return s;
+        }
+    }
+
+    void enforceMinimumSize(QRect &rect) const
+    {
+        if (rect.width() < 100) {
+            if (activeHandle_ == Handle::Left || activeHandle_ == Handle::TopLeft ||
+                activeHandle_ == Handle::BottomLeft)
+                rect.setLeft(rect.right() - 99);
+            else
+                rect.setRight(rect.left() + 99);
+        }
+
+        if (rect.height() < 80) {
+            if (activeHandle_ == Handle::Top || activeHandle_ == Handle::TopLeft ||
+                activeHandle_ == Handle::TopRight)
+                rect.setTop(rect.bottom() - 79);
+            else
+                rect.setBottom(rect.top() + 79);
+        }
+    }
+
     void clampRect()
     {
         if (logicalRect_.width() > kCanvasWidth)
@@ -1006,6 +1200,8 @@ private:
     QString label_;
     Handle activeHandle_ = Handle::None;
     bool dragging_ = false;
+    bool lockRatio_ = true;
+    double aspectRatio_ = 2.0;
     std::function<void(const QRect &)> changedCallback_;
 };
 
@@ -1014,15 +1210,24 @@ void showOverlayPreview(QWidget *parent, int overlayIndex, OverlayConfig &config
     const OverlayConfig originalConfig = config;
 
     QDialog dialog(parent);
-    dialog.setWindowTitle(QStringLiteral("Clatasha Overlay Preview"));
+    dialog.setWindowTitle(QStringLiteral("Clatasha Overlay Placement"));
     dialog.setModal(true);
-    dialog.resize(760, 540);
+    dialog.resize(790, 570);
 
     auto *previewNote = new QLabel(
-        QStringLiteral("The blue frame is only an editor guide. Drag it or its handles to position and resize the HUD overlay. Transparent widgets remain invisible on your desktop until they are triggered."),
+        QStringLiteral(
+            "Placement now scales the finished overlay instead of changing the browser viewport. "
+            "Lock Ratio keeps the current proportions while you drag a resize handle."),
         &dialog);
     previewNote->setWordWrap(true);
     previewNote->setStyleSheet(QStringLiteral("color:#8cc5ff; padding:2px 4px 6px 4px;"));
+
+    auto *sourceInfo = new QLabel(
+        QStringLiteral("Source canvas: %1 × %2")
+            .arg(config.sourceWidth)
+            .arg(config.sourceHeight),
+        &dialog);
+    sourceInfo->setStyleSheet(QStringLiteral("color:#8996a3; padding:0 4px 4px 4px;"));
 
     auto *modeTabs = new QTabWidget(&dialog);
     auto *hudPage = new QWidget(modeTabs);
@@ -1034,104 +1239,168 @@ void showOverlayPreview(QWidget *parent, int overlayIndex, OverlayConfig &config
         previewConfig.mode = OverlayMode::Hud;
         previewConfig.hudX = rect.x();
         previewConfig.hudY = rect.y();
-        previewConfig.width = rect.width();
-        previewConfig.height = rect.height();
+        previewConfig.hudWidth = rect.width();
+        previewConfig.hudHeight = rect.height();
         showHudOverlaySlot(overlayIndex, previewConfig, true);
     };
 
+    struct PageControls {
+        QSpinBox *x = nullptr;
+        QSpinBox *y = nullptr;
+        QSpinBox *w = nullptr;
+        QSpinBox *h = nullptr;
+        QCheckBox *lock = nullptr;
+    };
+
     auto buildPage = [&](QWidget *page, bool video) {
+        PageControls controlsData;
         auto *canvas = new OverlayPreviewCanvas(page);
         canvas->setLabel(config.name);
 
         const QRect initial(video ? config.videoX : config.hudX,
                             video ? config.videoY : config.hudY,
-                            config.width, config.height);
+                            video ? config.videoWidth : config.hudWidth,
+                            video ? config.videoHeight : config.hudHeight);
         canvas->setGeometryData(initial.x(), initial.y(), initial.width(), initial.height());
 
-        auto *xSpin = new QSpinBox(page);
-        auto *ySpin = new QSpinBox(page);
-        auto *wSpin = new QSpinBox(page);
-        auto *hSpin = new QSpinBox(page);
+        controlsData.x = new QSpinBox(page);
+        controlsData.y = new QSpinBox(page);
+        controlsData.w = new QSpinBox(page);
+        controlsData.h = new QSpinBox(page);
+        controlsData.lock = new QCheckBox(QStringLiteral("Lock Ratio"), page);
 
-        xSpin->setRange(0, kCanvasWidth - 20);
-        ySpin->setRange(0, kCanvasHeight - 20);
-        wSpin->setRange(100, 3840);
-        hSpin->setRange(80, 2160);
+        controlsData.x->setRange(0, kCanvasWidth - 20);
+        controlsData.y->setRange(0, kCanvasHeight - 20);
+        controlsData.w->setRange(100, kCanvasWidth);
+        controlsData.h->setRange(80, kCanvasHeight);
 
-        xSpin->setValue(initial.x());
-        ySpin->setValue(initial.y());
-        wSpin->setValue(initial.width());
-        hSpin->setValue(initial.height());
+        controlsData.x->setValue(initial.x());
+        controlsData.y->setValue(initial.y());
+        controlsData.w->setValue(initial.width());
+        controlsData.h->setValue(initial.height());
+        controlsData.lock->setChecked(video ? config.videoLockRatio : config.hudLockRatio);
 
-        auto updateFromSpins = [=, &showLiveHudPreview]() {
-            const QRect rect(xSpin->value(), ySpin->value(), wSpin->value(), hSpin->value());
-            canvas->setGeometryData(rect.x(), rect.y(), rect.width(), rect.height());
+        auto aspect = std::make_shared<double>(
+            initial.height() > 0
+                ? initial.width() / static_cast<double>(initial.height())
+                : 2.0);
+        canvas->setLockRatio(controlsData.lock->isChecked(), *aspect);
+
+        auto syncCanvas = [=, &showLiveHudPreview]() {
+            canvas->setGeometryData(
+                controlsData.x->value(),
+                controlsData.y->value(),
+                controlsData.w->value(),
+                controlsData.h->value());
             if (!video)
                 showLiveHudPreview(canvas->geometryData());
         };
 
-        QObject::connect(xSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
-                         [=, &showLiveHudPreview](int) { updateFromSpins(); });
-        QObject::connect(ySpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
-                         [=, &showLiveHudPreview](int) { updateFromSpins(); });
-        QObject::connect(wSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
-                         [=, &showLiveHudPreview](int) { updateFromSpins(); });
-        QObject::connect(hSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
-                         [=, &showLiveHudPreview](int) { updateFromSpins(); });
+        QObject::connect(controlsData.x, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
+                         [=, &showLiveHudPreview](int) { syncCanvas(); });
+        QObject::connect(controlsData.y, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
+                         [=, &showLiveHudPreview](int) { syncCanvas(); });
+
+        QObject::connect(controlsData.w, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
+                         [=, &showLiveHudPreview](int value) {
+                             if (controlsData.lock->isChecked()) {
+                                 const int height =
+                                     qBound(80, qRound(value / qMax(0.01, *aspect)), kCanvasHeight);
+                                 QSignalBlocker blocker(controlsData.h);
+                                 controlsData.h->setValue(height);
+                             }
+                             syncCanvas();
+                         });
+
+        QObject::connect(controlsData.h, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
+                         [=, &showLiveHudPreview](int value) {
+                             if (controlsData.lock->isChecked()) {
+                                 const int width =
+                                     qBound(100, qRound(value * qMax(0.01, *aspect)), kCanvasWidth);
+                                 QSignalBlocker blocker(controlsData.w);
+                                 controlsData.w->setValue(width);
+                             }
+                             syncCanvas();
+                         });
+
+        QObject::connect(controlsData.lock, &QCheckBox::toggled, &dialog,
+                         [=](bool checked) {
+                             if (checked && controlsData.h->value() > 0)
+                                 *aspect = controlsData.w->value() /
+                                           static_cast<double>(controlsData.h->value());
+                             canvas->setLockRatio(checked, *aspect);
+                         });
 
         canvas->setChangedCallback([=, &showLiveHudPreview](const QRect &rect) {
-            QSignalBlocker bx(xSpin);
-            QSignalBlocker by(ySpin);
-            QSignalBlocker bw(wSpin);
-            QSignalBlocker bh(hSpin);
-            xSpin->setValue(rect.x());
-            ySpin->setValue(rect.y());
-            wSpin->setValue(rect.width());
-            hSpin->setValue(rect.height());
+            QSignalBlocker bx(controlsData.x);
+            QSignalBlocker by(controlsData.y);
+            QSignalBlocker bw(controlsData.w);
+            QSignalBlocker bh(controlsData.h);
+            controlsData.x->setValue(rect.x());
+            controlsData.y->setValue(rect.y());
+            controlsData.w->setValue(rect.width());
+            controlsData.h->setValue(rect.height());
 
             if (!video)
                 showLiveHudPreview(rect);
         });
 
         auto *centerButton = new QPushButton(QStringLiteral("Center"), page);
-        auto *resetButton = new QPushButton(QStringLiteral("Reset Size"), page);
+        auto *resetButton = new QPushButton(QStringLiteral("Reset 1:1"), page);
 
         QObject::connect(centerButton, &QPushButton::clicked, &dialog, [=]() {
-            const int x = (kCanvasWidth - wSpin->value()) / 2;
-            const int y = (kCanvasHeight - hSpin->value()) / 2;
-            xSpin->setValue(qMax(0, x));
-            ySpin->setValue(qMax(0, y));
+            const int x = (kCanvasWidth - controlsData.w->value()) / 2;
+            const int y = (kCanvasHeight - controlsData.h->value()) / 2;
+            controlsData.x->setValue(qMax(0, x));
+            controlsData.y->setValue(qMax(0, y));
         });
 
         QObject::connect(resetButton, &QPushButton::clicked, &dialog, [=]() {
-            wSpin->setValue(600);
-            hSpin->setValue(300);
+            const int width = qBound(100, config.sourceWidth, kCanvasWidth);
+            const int height = qBound(80, config.sourceHeight, kCanvasHeight);
+            {
+                QSignalBlocker bw(controlsData.w);
+                QSignalBlocker bh(controlsData.h);
+                controlsData.w->setValue(width);
+                controlsData.h->setValue(height);
+            }
+            *aspect = width / static_cast<double>(qMax(1, height));
+            canvas->setLockRatio(controlsData.lock->isChecked(), *aspect);
+            syncCanvas();
         });
 
-        auto *controls = new QHBoxLayout();
-        controls->addWidget(new QLabel(QStringLiteral("X"), page));
-        controls->addWidget(xSpin);
-        controls->addWidget(new QLabel(QStringLiteral("Y"), page));
-        controls->addWidget(ySpin);
-        controls->addSpacing(8);
-        controls->addWidget(new QLabel(QStringLiteral("W"), page));
-        controls->addWidget(wSpin);
-        controls->addWidget(new QLabel(QStringLiteral("H"), page));
-        controls->addWidget(hSpin);
-        controls->addStretch();
-        controls->addWidget(centerButton);
-        controls->addWidget(resetButton);
+        auto *geometryRow = new QHBoxLayout();
+        geometryRow->addWidget(new QLabel(QStringLiteral("X"), page));
+        geometryRow->addWidget(controlsData.x);
+        geometryRow->addWidget(new QLabel(QStringLiteral("Y"), page));
+        geometryRow->addWidget(controlsData.y);
+        geometryRow->addSpacing(8);
+        geometryRow->addWidget(new QLabel(QStringLiteral("W"), page));
+        geometryRow->addWidget(controlsData.w);
+        geometryRow->addWidget(new QLabel(QStringLiteral("H"), page));
+        geometryRow->addWidget(controlsData.h);
+        geometryRow->addStretch();
+        geometryRow->addWidget(centerButton);
+        geometryRow->addWidget(resetButton);
+
+        auto *ratioRow = new QHBoxLayout();
+        ratioRow->addWidget(controlsData.lock);
+        ratioRow->addWidget(new QLabel(
+            QStringLiteral("Scales the overlay without changing its browser/source canvas."),
+            page));
+        ratioRow->addStretch();
 
         auto *layout = new QVBoxLayout(page);
         layout->setContentsMargins(12, 12, 12, 12);
         layout->addWidget(canvas, 1);
-        layout->addLayout(controls);
+        layout->addLayout(ratioRow);
+        layout->addLayout(geometryRow);
 
-        return std::array<QSpinBox *, 4>{xSpin, ySpin, wSpin, hSpin};
+        return controlsData;
     };
 
-    const auto hudSpins = buildPage(hudPage, false);
-    const auto videoSpins = buildPage(videoPage, true);
+    const PageControls hudControls = buildPage(hudPage, false);
+    const PageControls videoControls = buildPage(videoPage, true);
 
     modeTabs->addTab(hudPage, QStringLiteral("HUD Placement"));
     modeTabs->addTab(videoPage, QStringLiteral("VIDEO Placement"));
@@ -1139,13 +1408,16 @@ void showOverlayPreview(QWidget *parent, int overlayIndex, OverlayConfig &config
     if (config.mode == OverlayMode::Video)
         modeTabs->setCurrentWidget(videoPage);
 
-    if (!config.url.trimmed().isEmpty())
-        showLiveHudPreview(QRect(config.hudX, config.hudY, config.width, config.height));
+    if (!config.url.trimmed().isEmpty()) {
+        showLiveHudPreview(
+            QRect(config.hudX, config.hudY, config.hudWidth, config.hudHeight));
+    }
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
 
     auto *mainLayout = new QVBoxLayout(&dialog);
     mainLayout->addWidget(previewNote);
+    mainLayout->addWidget(sourceInfo);
     mainLayout->addWidget(modeTabs, 1);
     mainLayout->addWidget(buttons);
 
@@ -1159,21 +1431,21 @@ void showOverlayPreview(QWidget *parent, int overlayIndex, OverlayConfig &config
         "QTabBar::tab:selected { background:#2389ff; color:white; }"
         "QSpinBox { background:#171c22; color:#e8edf2; border:1px solid #303843; border-radius:4px; padding:4px; }"
         "QPushButton { background:#20262d; color:#e8edf2; border:1px solid #343d47; border-radius:5px; padding:6px 12px; }"
-        "QPushButton:hover { background:#2a323b; }"));
+        "QPushButton:hover { background:#2a323b; }"
+        "QCheckBox { spacing:7px; }"));
 
     if (dialog.exec() == QDialog::Accepted) {
-        config.hudX = hudSpins[0]->value();
-        config.hudY = hudSpins[1]->value();
-        config.videoX = videoSpins[0]->value();
-        config.videoY = videoSpins[1]->value();
+        config.hudX = hudControls.x->value();
+        config.hudY = hudControls.y->value();
+        config.hudWidth = hudControls.w->value();
+        config.hudHeight = hudControls.h->value();
+        config.hudLockRatio = hudControls.lock->isChecked();
 
-        if (modeTabs->currentWidget() == hudPage) {
-            config.width = qBound(100, hudSpins[2]->value(), 3840);
-            config.height = qBound(80, hudSpins[3]->value(), 2160);
-        } else {
-            config.width = qBound(100, videoSpins[2]->value(), 3840);
-            config.height = qBound(80, videoSpins[3]->value(), 2160);
-        }
+        config.videoX = videoControls.x->value();
+        config.videoY = videoControls.y->value();
+        config.videoWidth = videoControls.w->value();
+        config.videoHeight = videoControls.h->value();
+        config.videoLockRatio = videoControls.lock->isChecked();
 
         showHudOverlaySlot(overlayIndex, config, false);
     } else {
@@ -1201,21 +1473,84 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 static void ensure_hud()
 {
-    if (!g_hud)
-        g_hud = new ClatashaHudWindow();
+    if (g_hud)
+        return;
+
+    g_hud = new ClatashaHudWindow();
+
+    g_hudWatchdog = new QTimer(g_hud);
+    g_hudWatchdog->setInterval(1500);
+    QObject::connect(g_hudWatchdog, &QTimer::timeout, []() {
+        if (!g_hud || !g_hudWantedVisible)
+            return;
+
+        bool restored = false;
+        if (!g_hud->isVisible()) {
+            g_hud->show();
+            g_hud->positionHud();
+            restored = true;
+        }
+
+#ifdef Q_OS_WIN
+        const HWND hwnd = reinterpret_cast<HWND>(g_hud->winId());
+        if (hwnd) {
+            if (IsIconic(hwnd)) {
+                ShowWindow(hwnd, SW_RESTORE);
+                restored = true;
+            }
+
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+#else
+        if (restored)
+            g_hud->raise();
+#endif
+
+        if (restored)
+            blog(LOG_INFO, "[Clatasha HUD] Restored main HUD visibility");
+    });
+    g_hudWatchdog->start();
+
+    QObject::connect(g_hud, &QObject::destroyed, []() {
+        g_hudWatchdog = nullptr;
+    });
 }
 
 static void toggle_hud()
 {
     ensure_hud();
 
-    if (g_hud->isVisible()) {
+    g_hudWantedVisible = !g_hudWantedVisible;
+
+    if (!g_hudWantedVisible) {
         g_hud->hide();
-    } else {
-        g_hud->show();
-        g_hud->positionHud();
-        g_hud->raise();
+        return;
     }
+
+    g_hud->show();
+    g_hud->positionHud();
+    g_hud->raise();
+
+#ifdef Q_OS_WIN
+    const HWND hwnd = reinterpret_cast<HWND>(g_hud->winId());
+    if (hwnd) {
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+#endif
 }
 
 static void show_settings()
@@ -1343,8 +1678,7 @@ static void show_settings()
         sourceRow->addWidget(rows[i].browse);
 
         auto *bottomRow = new QHBoxLayout();
-        rows[i].sizeLabel = new QLabel(
-            QStringLiteral("%1 × %2").arg(overlayConfigs[i].width).arg(overlayConfigs[i].height), card);
+        rows[i].sizeLabel = new QLabel(overlaySizeText(overlayConfigs[i]), card);
         rows[i].sizeLabel->setProperty("muted", true);
         rows[i].preview = new QPushButton(QStringLiteral("Preview / Edit"), card);
 
@@ -1390,8 +1724,7 @@ static void show_settings()
 
             showOverlayPreview(&dialog, i, overlayConfigs[i]);
 
-            rows[i].sizeLabel->setText(
-                QStringLiteral("%1 × %2").arg(overlayConfigs[i].width).arg(overlayConfigs[i].height));
+            rows[i].sizeLabel->setText(overlaySizeText(overlayConfigs[i]));
         });
     }
 
@@ -1528,6 +1861,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 {
     switch (event) {
     case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+        g_hudWantedVisible = true;
         ensure_hud();
         g_hud->show();
         g_hud->positionHud();
@@ -1544,6 +1878,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
         break;
 
     case OBS_FRONTEND_EVENT_EXIT:
+        g_hudWantedVisible = false;
         destroyHudOverlays();
         if (g_hud) {
             g_hud->saveSettings();
@@ -1579,6 +1914,7 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+    g_hudWantedVisible = false;
     obs_frontend_remove_event_callback(on_frontend_event, nullptr);
     destroyHudOverlays();
 

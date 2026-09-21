@@ -103,7 +103,8 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
 {
     setWindowTitle(QStringLiteral("Clatasha HUD"));
     setFixedSize(kHudWidth, kHudHeight);
-    setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
+                   Qt::WindowDoesNotAcceptFocus);
     setAttribute(Qt::WA_TranslucentBackground, true);
     setAttribute(Qt::WA_TransparentForMouseEvents, true);
     setWindowFlag(Qt::WindowTransparentForInput, true);

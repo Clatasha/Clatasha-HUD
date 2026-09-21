@@ -21,6 +21,7 @@ The plugin runs inside OBS Studio. It does not require a separate Python process
 - Recording-drive free-space display.
 - Recording/streaming activity spinner.
 - Adjustable HUD opacity and corner placement.
+- Visibility watchdog that restores the main HUD if Windows unexpectedly hides or drops its topmost state.
 - Windows capture-exclusion request for local HUD windows where supported.
 
 If game FPS cannot be read, Clatasha HUD displays `--` rather than substituting OBS renderer FPS.
@@ -34,7 +35,9 @@ Clatasha HUD includes five configurable overlay slots. Each slot has:
 - URL or local-file input.
 - `HUD`, `VIDEO`, or `HUD / VIDEO` output mode.
 - Preview/Edit placement tool with drag and resize handles.
-- Saved HUD and VIDEO placement.
+- Separate source resolution and displayed size, so resizing scales the overlay instead of changing/cropping the browser viewport.
+- **Lock Ratio** for HUD and VIDEO placement, enabled by default.
+- Independent saved HUD and VIDEO placement/size.
 - Apply confirmation toast.
 
 ### Supported overlay inputs
