@@ -58,6 +58,28 @@ namespace {
 constexpr int kOverlayCount = 5;
 constexpr int kCanvasWidth = 1920;
 constexpr int kCanvasHeight = 1080;
+constexpr int kHudChromaR = 1;
+constexpr int kHudChromaG = 2;
+constexpr int kHudChromaB = 3;
+
+const char *kHudChromaScript = R"JS(
+(() => {
+    const id = 'clatasha-hud-chroma-style';
+    let style = document.getElementById(id);
+    if (!style) {
+        style = document.createElement('style');
+        style.id = id;
+        (document.head || document.documentElement).appendChild(style);
+    }
+    style.textContent =
+        'html, body { background: rgb(1, 2, 3) !important; ' +
+        'background-color: rgb(1, 2, 3) !important; }';
+    if (document.documentElement)
+        document.documentElement.style.setProperty('background-color', 'rgb(1, 2, 3)', 'important');
+    if (document.body)
+        document.body.style.setProperty('background-color', 'rgb(1, 2, 3)', 'important');
+})();
+)JS";
 
 enum class OverlayMode {
     Hud = 0,
@@ -156,12 +178,11 @@ public:
         setWindowTitle(QStringLiteral("Clatasha HUD Browser %1").arg(index + 1));
         setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
                        Qt::WindowDoesNotAcceptFocus);
-        setAttribute(Qt::WA_TranslucentBackground, true);
-        setAttribute(Qt::WA_NoSystemBackground, true);
+        setAttribute(Qt::WA_NoSystemBackground, false);
         setAttribute(Qt::WA_TransparentForMouseEvents, true);
         setAttribute(Qt::WA_NativeWindow, true);
         setWindowFlag(Qt::WindowTransparentForInput, true);
-        setStyleSheet(QStringLiteral("background: transparent;"));
+        setStyleSheet(QStringLiteral("background: rgb(1, 2, 3);"));
     }
 
     ~BrowserHudOverlay() override = default;
@@ -182,11 +203,8 @@ public:
             }
 
             browser_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-            browser_->setAttribute(Qt::WA_TranslucentBackground, true);
-            browser_->setStyleSheet(QStringLiteral("background: transparent;"));
-            browser_->setStartupScript(
-                "document.documentElement.style.background='transparent';"
-                "if(document.body)document.body.style.background='transparent';");
+            browser_->setStyleSheet(QStringLiteral("background: rgb(1, 2, 3);"));
+            browser_->setStartupScript(kHudChromaScript);
             browser_->show();
         } else if (config.url != url_) {
             browser_->setURL(url);
@@ -196,15 +214,32 @@ public:
         positionFromConfig(config);
 
         browser_->setGeometry(rect());
+        browser_->executeJavaScript(kHudChromaScript);
         show();
         raise();
 
 #ifdef Q_OS_WIN
         const HWND hwnd = reinterpret_cast<HWND>(winId());
-        if (hwnd && !SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)) {
-            blog(LOG_DEBUG,
-                 "[Clatasha HUD] Capture exclusion unavailable for HUD browser %d: %lu",
-                 index_ + 1, GetLastError());
+        if (hwnd) {
+            LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            exStyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exStyle);
+
+            if (!SetLayeredWindowAttributes(
+                    hwnd,
+                    RGB(kHudChromaR, kHudChromaG, kHudChromaB),
+                    0,
+                    LWA_COLORKEY)) {
+                blog(LOG_WARNING,
+                     "[Clatasha HUD] HUD chroma transparency failed for browser %d: %lu",
+                     index_ + 1, GetLastError());
+            }
+
+            if (!SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)) {
+                blog(LOG_DEBUG,
+                     "[Clatasha HUD] Capture exclusion unavailable for HUD browser %d: %lu",
+                     index_ + 1, GetLastError());
+            }
         }
 #endif
 
@@ -1113,6 +1148,34 @@ static void show_settings()
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply, &dialog);
 
+    auto *applyToast = new QLabel(QStringLiteral("✓ Changes applied"), &dialog);
+    applyToast->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    applyToast->setStyleSheet(QStringLiteral(
+        "QLabel {"
+        " background:#153820;"
+        " color:#bdf5c9;"
+        " border:1px solid #2d7140;"
+        " border-radius:7px;"
+        " padding:8px 14px;"
+        " font-weight:600;"
+        "}"));
+    applyToast->hide();
+
+    auto *toastTimer = new QTimer(&dialog);
+    toastTimer->setSingleShot(true);
+    QObject::connect(toastTimer, &QTimer::timeout, applyToast, &QLabel::hide);
+
+    auto showApplyToast = [&]() {
+        applyToast->setText(QStringLiteral("✓ Changes applied"));
+        applyToast->adjustSize();
+        applyToast->move(
+            qMax(12, (dialog.width() - applyToast->width()) / 2),
+            qMax(12, dialog.height() - applyToast->height() - 62));
+        applyToast->raise();
+        applyToast->show();
+        toastTimer->start(1800);
+    };
+
     auto syncRowsToConfigs = [&]() {
         for (int i = 0; i < kOverlayCount; ++i) {
             overlayConfigs[i].enabled = rows[i].enabled->isChecked();
@@ -1124,7 +1187,7 @@ static void show_settings()
         }
     };
 
-    auto applySettings = [&]() {
+    auto applySettings = [&]() -> bool {
         syncRowsToConfigs();
         g_hud->saveSettings();
         saveOverlayConfigs(overlayConfigs);
@@ -1137,7 +1200,10 @@ static void show_settings()
                 &dialog,
                 QStringLiteral("Browser Overlay Unavailable"),
                 QStringLiteral("One or more browser overlays could not be created. Make sure the OBS Browser plugin is installed and enabled."));
+            return false;
         }
+
+        return true;
     };
 
     QObject::connect(opacitySlider, &QSlider::valueChanged, [&](int value) {
@@ -1150,10 +1216,13 @@ static void show_settings()
     });
 
     QObject::connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, &dialog,
-                     [&]() { applySettings(); });
+                     [&]() {
+                         if (applySettings())
+                             showApplyToast();
+                     });
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&]() {
-        applySettings();
-        dialog.accept();
+        if (applySettings())
+            dialog.accept();
     });
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
