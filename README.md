@@ -15,6 +15,7 @@ The plugin runs inside OBS Studio. It does not require a separate Python process
 <p align="center">
   <img src="assets/clatasha%20hud%20image2.jpg" width="500" alt="Clatasha HUD logo">
 </p>
+
 ### Compact local HUD
 
 - 145 × 50 frameless, always-on-top, click-through HUD.
@@ -33,6 +34,7 @@ If game FPS cannot be read, Clatasha HUD displays `--` rather than substituting 
 <p align="center">
   <img src="assets/clatasha%20hud%20image.jpg" width="500" alt="Clatasha HUD logo">
 </p>
+
 ### Browser Overlays
 
 Clatasha HUD includes five configurable overlay slots. Each slot has:
