@@ -79,6 +79,8 @@ struct OverlayConfig {
 };
 
 
+bool modeHasHud(OverlayMode mode);
+
 struct QCefCookieManager;
 
 class QCefWidget : public QWidget {
