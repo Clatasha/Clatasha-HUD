@@ -20,6 +20,7 @@ public:
 
     int opacityPercent() const { return opacityPercent_; }
     QString location() const { return location_; }
+    const QPixmap &logoPixmap() const { return logo_; }
 
     void setOpacityPercent(int value);
     void setLocation(const QString &location);

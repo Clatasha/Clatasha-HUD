@@ -2,10 +2,14 @@
 #include <obs-frontend-api.h>
 
 #include <QAction>
+#include <QApplication>
+#include <QButtonGroup>
+#include <QClipboard>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFormLayout>
 #include <QFile>
@@ -29,6 +33,7 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QTabWidget>
 #include <QTimer>
 #include <QUrl>
@@ -1566,13 +1571,13 @@ static void show_settings()
     QDialog dialog(parent);
     dialog.setWindowTitle(QStringLiteral("Clatasha HUD Settings"));
     dialog.setModal(true);
-    dialog.resize(790, 720);
-    dialog.setMinimumSize(720, 620);
+    dialog.resize(930, 720);
+    dialog.setMinimumSize(860, 640);
 
-    auto *tabs = new QTabWidget(&dialog);
+    auto *pages = new QStackedWidget(&dialog);
 
     // HUD tab
-    auto *hudTab = new QWidget(tabs);
+    auto *hudTab = new QWidget(pages);
     auto *opacitySlider = new QSlider(Qt::Horizontal, hudTab);
     opacitySlider->setRange(10, 100);
     opacitySlider->setValue(originalOpacity);
@@ -1606,16 +1611,31 @@ static void show_settings()
     hudInfo->setWordWrap(true);
     hudInfo->setProperty("muted", true);
 
+    auto *hudTitle = new QLabel(QStringLiteral("HUD"), hudTab);
+    QFont hudTitleFont = hudTitle->font();
+    hudTitleFont.setPointSize(15);
+    hudTitleFont.setBold(true);
+    hudTitle->setFont(hudTitleFont);
+
+    auto *hudSubtitle = new QLabel(
+        QStringLiteral("Control the compact private status HUD shown over your desktop."),
+        hudTab);
+    hudSubtitle->setWordWrap(true);
+    hudSubtitle->setProperty("muted", true);
+
     auto *hudLayout = new QVBoxLayout(hudTab);
-    hudLayout->setContentsMargins(16, 16, 16, 16);
+    hudLayout->setContentsMargins(18, 18, 18, 18);
+    hudLayout->setSpacing(12);
+    hudLayout->addWidget(hudTitle);
+    hudLayout->addWidget(hudSubtitle);
     hudLayout->addWidget(hudCard);
     hudLayout->addWidget(hudInfo);
     hudLayout->addStretch();
 
-    tabs->addTab(hudTab, QStringLiteral("HUD"));
+    const int hudPageIndex = pages->addWidget(hudTab);
 
     // Browser overlays tab
-    auto *browserTab = new QWidget(tabs);
+    auto *browserTab = new QWidget(pages);
     auto *browserLayout = new QVBoxLayout(browserTab);
     browserLayout->setContentsMargins(16, 16, 16, 16);
     browserLayout->setSpacing(12);
@@ -1740,7 +1760,316 @@ static void show_settings()
     videoNote->setProperty("accentNote", true);
     browserLayout->addWidget(videoNote);
 
-    tabs->addTab(browserTab, QStringLiteral("Browser Overlays"));
+    const int browserPageIndex = pages->addWidget(browserTab);
+
+    // Future-ready settings pages. Existing behavior stays on HUD and Browser Overlays;
+    // the other pages give Clatasha HUD a consistent product shell as it grows.
+    auto makeInfoPage = [&](const QString &pageTitle,
+                            const QString &pageSubtitle,
+                            const QString &bodyText) {
+        auto *page = new QWidget(pages);
+        auto *pageLayout = new QVBoxLayout(page);
+        pageLayout->setContentsMargins(18, 18, 18, 18);
+        pageLayout->setSpacing(12);
+
+        auto *pageHeading = new QLabel(pageTitle, page);
+        QFont headingFont = pageHeading->font();
+        headingFont.setPointSize(15);
+        headingFont.setBold(true);
+        pageHeading->setFont(headingFont);
+
+        auto *pageSub = new QLabel(pageSubtitle, page);
+        pageSub->setWordWrap(true);
+        pageSub->setProperty("muted", true);
+
+        auto *card = new QGroupBox(page);
+        auto *cardLayout = new QVBoxLayout(card);
+        cardLayout->setContentsMargins(18, 18, 18, 18);
+        auto *body = new QLabel(bodyText, card);
+        body->setWordWrap(true);
+        body->setTextFormat(Qt::RichText);
+        body->setOpenExternalLinks(true);
+        cardLayout->addWidget(body);
+
+        pageLayout->addWidget(pageHeading);
+        pageLayout->addWidget(pageSub);
+        pageLayout->addWidget(card);
+        pageLayout->addStretch();
+        return page;
+    };
+
+    auto *generalPage = makeInfoPage(
+        QStringLiteral("General"),
+        QStringLiteral("Clatasha HUD status and core behavior."),
+        QStringLiteral(
+            "<b>Clatasha HUD</b> runs inside OBS Studio and provides a private status HUD "
+            "plus browser overlays for HUD, VIDEO, or both.<br><br>"
+            "The main HUD starts automatically with OBS and now includes a visibility "
+            "watchdog that restores it if Windows unexpectedly hides it."));
+
+    auto *appearancePage = makeInfoPage(
+        QStringLiteral("Appearance"),
+        QStringLiteral("Visual controls for Clatasha HUD."),
+        QStringLiteral(
+            "The current compact HUD uses Clatasha's dark interface. "
+            "HUD opacity and screen-corner placement are available on the <b>HUD</b> page. "
+            "This page is ready for future theme and visual options."));
+
+    auto *hotkeysPage = makeInfoPage(
+        QStringLiteral("Hotkeys"),
+        QStringLiteral("Keyboard control for Clatasha HUD."),
+        QStringLiteral(
+            "Custom Clatasha HUD hotkeys are not registered yet. "
+            "This page is reserved for HUD visibility, overlay controls, and other "
+            "keyboard actions as they are added."));
+
+    auto *advancedPage = makeInfoPage(
+        QStringLiteral("Advanced"),
+        QStringLiteral("Rendering and compatibility information."),
+        QStringLiteral(
+            "Browser overlays use OBS Browser Source. HUD browser content is rendered "
+            "off-screen with alpha and composited into the private desktop overlay. "
+            "Game FPS uses the Clatasha DXGI ETW helper."));
+
+    auto *aboutPage = makeInfoPage(
+        QStringLiteral("About"),
+        QStringLiteral("Clatasha HUD"),
+        QStringLiteral(
+            "<b>Clatasha HUD v0.1.0</b><br>"
+            "Stream Smarter. Create More.<br><br>"
+            "<a href='https://github.com/Clatasha/Clatasha-HUD'>GitHub project</a><br><br>"
+            "Built as part of the Clatasha creator-tool ecosystem."));
+
+    const int generalPageIndex = pages->addWidget(generalPage);
+    const int appearancePageIndex = pages->addWidget(appearancePage);
+    const int hotkeysPageIndex = pages->addWidget(hotkeysPage);
+    const int advancedPageIndex = pages->addWidget(advancedPage);
+    const int aboutPageIndex = pages->addWidget(aboutPage);
+
+    // Branded header: logo sits left of the two-line title/slogan block and is
+    // vertically centered across both lines.
+    auto *header = new QFrame(&dialog);
+    header->setObjectName(QStringLiteral("settingsHeader"));
+    auto *headerLayout = new QHBoxLayout(header);
+    headerLayout->setContentsMargins(16, 9, 16, 9);
+    headerLayout->setSpacing(10);
+
+    auto *brandLogo = new QLabel(header);
+    brandLogo->setFixedSize(42, 42);
+    brandLogo->setAlignment(Qt::AlignCenter);
+    if (!g_hud->logoPixmap().isNull()) {
+        brandLogo->setPixmap(
+            g_hud->logoPixmap().scaled(
+                40, 40, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+
+    auto *brandText = new QWidget(header);
+    auto *brandTextLayout = new QVBoxLayout(brandText);
+    brandTextLayout->setContentsMargins(0, 0, 0, 0);
+    brandTextLayout->setSpacing(0);
+
+    auto *brandTitle = new QLabel(QStringLiteral("Clatasha HUD Settings"), brandText);
+    QFont brandTitleFont = brandTitle->font();
+    brandTitleFont.setPointSize(12);
+    brandTitleFont.setBold(true);
+    brandTitle->setFont(brandTitleFont);
+
+    auto *brandSlogan =
+        new QLabel(QStringLiteral("Stream Smarter. Create More."), brandText);
+    brandSlogan->setObjectName(QStringLiteral("brandSlogan"));
+
+    brandTextLayout->addStretch();
+    brandTextLayout->addWidget(brandTitle);
+    brandTextLayout->addWidget(brandSlogan);
+    brandTextLayout->addStretch();
+
+    auto *versionLabel = new QLabel(QStringLiteral("v0.1.0"), header);
+    versionLabel->setObjectName(QStringLiteral("versionLabel"));
+
+    auto *donateButton = new QPushButton(QStringLiteral("♥  Donate"), header);
+    donateButton->setObjectName(QStringLiteral("donateButton"));
+    donateButton->setCursor(Qt::PointingHandCursor);
+
+    headerLayout->addWidget(brandLogo);
+    headerLayout->addWidget(brandText);
+    headerLayout->addStretch();
+    headerLayout->addWidget(versionLabel);
+    headerLayout->addSpacing(6);
+    headerLayout->addWidget(donateButton);
+
+    QObject::connect(donateButton, &QPushButton::clicked, &dialog, [&]() {
+        QDialog donateDialog(&dialog);
+        donateDialog.setWindowTitle(QStringLiteral("Support Clatasha HUD"));
+        donateDialog.setModal(true);
+        donateDialog.setFixedWidth(470);
+
+        auto *donateLayout = new QVBoxLayout(&donateDialog);
+        donateLayout->setContentsMargins(18, 18, 18, 18);
+        donateLayout->setSpacing(12);
+
+        auto *donateTitle = new QLabel(QStringLiteral("Support Clatasha HUD"), &donateDialog);
+        QFont donateTitleFont = donateTitle->font();
+        donateTitleFont.setPointSize(14);
+        donateTitleFont.setBold(true);
+        donateTitle->setFont(donateTitleFont);
+
+        auto *donateText = new QLabel(
+            QStringLiteral(
+                "If Clatasha HUD helps your stream, you can support continued development."),
+            &donateDialog);
+        donateText->setWordWrap(true);
+        donateText->setProperty("muted", true);
+
+        auto *toast = new QLabel(&donateDialog);
+        toast->setObjectName(QStringLiteral("donationToast"));
+        toast->setAlignment(Qt::AlignCenter);
+        toast->hide();
+
+        auto *toastTimer = new QTimer(&donateDialog);
+        toastTimer->setSingleShot(true);
+        QObject::connect(toastTimer, &QTimer::timeout, toast, &QLabel::hide);
+
+        auto showDonationToast = [&](const QString &message) {
+            toast->setText(message);
+            toast->show();
+            toastTimer->start(1800);
+        };
+
+        auto makeSupportRow = [&](const QString &titleText,
+                                  const QString &detailText,
+                                  const QString &buttonText,
+                                  std::function<void()> action) {
+            auto *row = new QFrame(&donateDialog);
+            row->setObjectName(QStringLiteral("supportRow"));
+            auto *rowLayout = new QHBoxLayout(row);
+            rowLayout->setContentsMargins(12, 10, 12, 10);
+
+            auto *textWrap = new QWidget(row);
+            auto *textLayout = new QVBoxLayout(textWrap);
+            textLayout->setContentsMargins(0, 0, 0, 0);
+            textLayout->setSpacing(1);
+
+            auto *title = new QLabel(titleText, textWrap);
+            QFont titleFont = title->font();
+            titleFont.setBold(true);
+            title->setFont(titleFont);
+
+            auto *detail = new QLabel(detailText, textWrap);
+            detail->setProperty("muted", true);
+            detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
+            auto *actionButton = new QPushButton(buttonText, row);
+            actionButton->setCursor(Qt::PointingHandCursor);
+
+            textLayout->addWidget(title);
+            textLayout->addWidget(detail);
+            rowLayout->addWidget(textWrap, 1);
+            rowLayout->addWidget(actionButton);
+
+            QObject::connect(actionButton, &QPushButton::clicked, &donateDialog,
+                             [action = std::move(action)]() { action(); });
+            return row;
+        };
+
+        auto *kofiRow = makeSupportRow(
+            QStringLiteral("Ko-fi"),
+            QStringLiteral("ko-fi.com/derspawn"),
+            QStringLiteral("Open Ko-fi"),
+            [&]() {
+                QDesktopServices::openUrl(QUrl(QStringLiteral("https://ko-fi.com/derspawn")));
+                showDonationToast(QStringLiteral("Opening Ko-fi…"));
+            });
+
+        auto *paypalRow = makeSupportRow(
+            QStringLiteral("PayPal"),
+            QStringLiteral("paypal.me/BFHQ"),
+            QStringLiteral("Open PayPal"),
+            [&]() {
+                QDesktopServices::openUrl(
+                    QUrl(QStringLiteral("https://www.paypal.com/paypalme/BFHQ")));
+                showDonationToast(QStringLiteral("Opening PayPal…"));
+            });
+
+        const QString bitcoinAddress =
+            QStringLiteral("14pqVhaQyGWYzz8XcYLNaCyGKHN2G1gZcA");
+        auto *bitcoinRow = makeSupportRow(
+            QStringLiteral("Bitcoin"),
+            bitcoinAddress,
+            QStringLiteral("Copy Address"),
+            [&]() {
+                if (QGuiApplication::clipboard())
+                    QGuiApplication::clipboard()->setText(bitcoinAddress);
+                showDonationToast(QStringLiteral("✓ Bitcoin address copied"));
+            });
+
+        auto *closeButton = new QPushButton(QStringLiteral("Close"), &donateDialog);
+        QObject::connect(closeButton, &QPushButton::clicked, &donateDialog, &QDialog::accept);
+
+        donateLayout->addWidget(donateTitle);
+        donateLayout->addWidget(donateText);
+        donateLayout->addWidget(kofiRow);
+        donateLayout->addWidget(paypalRow);
+        donateLayout->addWidget(bitcoinRow);
+        donateLayout->addWidget(toast);
+        donateLayout->addWidget(closeButton, 0, Qt::AlignRight);
+
+        donateDialog.setStyleSheet(QStringLiteral(
+            "QDialog { background:#0c1015; color:#edf3f8; }"
+            "QFrame#supportRow { background:#151b22; border:1px solid #2b3641; border-radius:8px; }"
+            "QLabel[muted='true'] { color:#8d9aa6; }"
+            "QPushButton { background:#202832; color:#edf3f8; border:1px solid #344250;"
+            " border-radius:6px; padding:7px 12px; }"
+            "QPushButton:hover { background:#293441; border-color:#4a5d70; }"
+            "QLabel#donationToast { background:#153820; color:#bdf5c9;"
+            " border:1px solid #2d7140; border-radius:6px; padding:7px 10px; }"));
+
+        donateDialog.exec();
+    });
+
+    // Left navigation.
+    auto *sidebar = new QFrame(&dialog);
+    sidebar->setObjectName(QStringLiteral("settingsSidebar"));
+    sidebar->setFixedWidth(168);
+    auto *sidebarLayout = new QVBoxLayout(sidebar);
+    sidebarLayout->setContentsMargins(8, 12, 8, 12);
+    sidebarLayout->setSpacing(5);
+
+    auto *navGroup = new QButtonGroup(&dialog);
+    navGroup->setExclusive(true);
+
+    auto addNavButton = [&](const QString &label, int pageIndex, bool bottom = false) {
+        auto *button = new QPushButton(label, sidebar);
+        button->setCheckable(true);
+        button->setProperty("navButton", true);
+        button->setCursor(Qt::PointingHandCursor);
+        navGroup->addButton(button);
+        if (bottom)
+            sidebarLayout->addStretch();
+        sidebarLayout->addWidget(button);
+
+        QObject::connect(button, &QPushButton::clicked, pages,
+                         [pages, pageIndex]() { pages->setCurrentIndex(pageIndex); });
+        return button;
+    };
+
+    auto *generalNav =
+        addNavButton(QStringLiteral("⚙   General"), generalPageIndex);
+    auto *browserNav =
+        addNavButton(QStringLiteral("▣   Browser Overlays"), browserPageIndex);
+    auto *hudNav =
+        addNavButton(QStringLiteral("▥   HUD"), hudPageIndex);
+    auto *appearanceNav =
+        addNavButton(QStringLiteral("◐   Appearance"), appearancePageIndex);
+    auto *hotkeysNav =
+        addNavButton(QStringLiteral("⌨   Hotkeys"), hotkeysPageIndex);
+    auto *advancedNav =
+        addNavButton(QStringLiteral("⚒   Advanced"), advancedPageIndex);
+    auto *aboutNav =
+        addNavButton(QStringLiteral("ⓘ   About"), aboutPageIndex, true);
+
+    // Browser Overlays is the most-used configuration page and mirrors the concept.
+    browserNav->setChecked(true);
+    pages->setCurrentIndex(browserPageIndex);
 
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply, &dialog);
@@ -1823,32 +2152,67 @@ static void show_settings()
     });
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
+    auto *content = new QWidget(&dialog);
+    auto *contentLayout = new QVBoxLayout(content);
+    contentLayout->setContentsMargins(0, 0, 0, 0);
+    contentLayout->setSpacing(10);
+    contentLayout->addWidget(pages, 1);
+    contentLayout->addWidget(buttons);
+
+    auto *body = new QWidget(&dialog);
+    auto *bodyLayout = new QHBoxLayout(body);
+    bodyLayout->setContentsMargins(0, 0, 0, 0);
+    bodyLayout->setSpacing(0);
+    bodyLayout->addWidget(sidebar);
+    bodyLayout->addWidget(content, 1);
+
     auto *layout = new QVBoxLayout(&dialog);
-    layout->setContentsMargins(12, 12, 12, 12);
-    layout->addWidget(tabs, 1);
-    layout->addWidget(buttons);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    layout->addWidget(header);
+    layout->addWidget(body, 1);
 
     dialog.setStyleSheet(QStringLiteral(
-        "QDialog { background:#0c0f13; color:#e9eef3; }"
+        "QDialog { background:#0b0f14; color:#e9eef3; }"
         "QWidget { color:#e9eef3; font-family:'Segoe UI'; font-size:10pt; }"
-        "QTabWidget::pane { border:1px solid #252c34; background:#101419; border-radius:7px; }"
-        "QTabBar::tab { background:#151a20; color:#9da8b3; padding:9px 18px; margin-right:2px; border-top-left-radius:5px; border-top-right-radius:5px; }"
-        "QTabBar::tab:selected { background:#2389ff; color:white; }"
-        "QGroupBox { background:#151a20; border:1px solid #29313a; border-radius:8px; margin-top:10px; font-weight:600; }"
+
+        "QFrame#settingsHeader { background:#0d141c; border-bottom:1px solid #26313d; }"
+        "QLabel#brandSlogan { color:#5f9ed7; font-size:8.5pt; }"
+        "QLabel#versionLabel { color:#81909d; font-size:8.5pt; }"
+        "QPushButton#donateButton { background:#16283a; color:#9dd1ff;"
+        " border:1px solid #2b5b82; border-radius:7px; padding:7px 14px; font-weight:600; }"
+        "QPushButton#donateButton:hover { background:#1b3550; border-color:#3e79a8; }"
+
+        "QFrame#settingsSidebar { background:#101821; border-right:1px solid #26313d; }"
+        "QPushButton[navButton='true'] { text-align:left; background:transparent;"
+        " color:#aab6c2; border:1px solid transparent; border-radius:6px;"
+        " padding:9px 10px; font-weight:500; }"
+        "QPushButton[navButton='true']:hover { background:#182431; color:#dce8f3; }"
+        "QPushButton[navButton='true']:checked { background:#146dcc; color:white;"
+        " border-color:#2389ff; }"
+
+        "QStackedWidget { background:#0d1218; }"
+        "QGroupBox { background:#151a20; border:1px solid #29313a; border-radius:8px;"
+        " margin-top:10px; font-weight:600; }"
         "QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 5px; color:#dfe7ee; }"
-        "QLineEdit,QComboBox,QSpinBox { background:#0f1318; border:1px solid #303943; border-radius:5px; padding:6px 8px; selection-background-color:#2389ff; }"
+        "QLineEdit,QComboBox,QSpinBox { background:#0f1318; border:1px solid #303943;"
+        " border-radius:5px; padding:6px 8px; selection-background-color:#2389ff; }"
         "QLineEdit:focus,QComboBox:focus,QSpinBox:focus { border:1px solid #2389ff; }"
-        "QPushButton { background:#20262d; border:1px solid #343e48; border-radius:5px; padding:7px 13px; }"
+        "QPushButton { background:#20262d; border:1px solid #343e48; border-radius:5px;"
+        " padding:7px 13px; }"
         "QPushButton:hover { background:#29313a; border-color:#46525f; }"
         "QPushButton:pressed { background:#1b2026; }"
         "QCheckBox { spacing:7px; }"
         "QSlider::groove:horizontal { height:4px; background:#2a3139; border-radius:2px; }"
-        "QSlider::handle:horizontal { width:14px; margin:-5px 0; background:#2389ff; border-radius:7px; }"
-        "QScrollArea { background:transparent; }"
+        "QSlider::handle:horizontal { width:14px; margin:-5px 0; background:#2389ff;"
+        " border-radius:7px; }"
+        "QScrollArea { background:transparent; border:0; }"
         "QScrollBar:vertical { background:#0f1318; width:9px; }"
         "QScrollBar::handle:vertical { background:#343e48; border-radius:4px; min-height:30px; }"
         "QLabel[muted='true'] { color:#8f9aa6; }"
-        "QLabel[accentNote='true'] { color:#8cc5ff; background:#111d29; border:1px solid #24435e; border-radius:6px; padding:8px; }"));
+        "QLabel[accentNote='true'] { color:#8cc5ff; background:#111d29;"
+        " border:1px solid #24435e; border-radius:6px; padding:8px; }"));
+
 
     if (dialog.exec() != QDialog::Accepted) {
         g_hud->setOpacityPercent(originalOpacity);
