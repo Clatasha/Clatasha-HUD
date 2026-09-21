@@ -6,7 +6,11 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QFormLayout>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QGroupBox>
 #include <QGuiApplication>
@@ -80,14 +84,43 @@ struct OverlayConfig {
     int videoY = 40;
 };
 
-bool isDirectImageUrl(const QString &url)
+QString localFilePathFromValue(const QString &value)
 {
-    const QString trimmed = url.trimmed();
+    const QString trimmed = value.trimmed();
+    if (trimmed.isEmpty())
+        return {};
+
+    const QUrl url(trimmed);
+    if (url.isLocalFile())
+        return QDir::cleanPath(url.toLocalFile());
+
+    const QFileInfo info(trimmed);
+    if (info.exists() && info.isFile())
+        return QDir::cleanPath(info.absoluteFilePath());
+
+#ifdef Q_OS_WIN
+    // Preserve a manually entered Windows absolute path even before QFileInfo
+    // has resolved it, so it can be reported/loaded consistently.
+    if (trimmed.size() >= 3 && trimmed.at(1) == QLatin1Char(':') &&
+        (trimmed.at(2) == QLatin1Char('\\') || trimmed.at(2) == QLatin1Char('/')))
+        return QDir::cleanPath(trimmed);
+#endif
+
+    return {};
+}
+
+bool isDirectImageUrl(const QString &value)
+{
+    const QString trimmed = value.trimmed();
     if (trimmed.startsWith(QStringLiteral("data:image/"), Qt::CaseInsensitive))
         return true;
 
-    const QUrl parsed(trimmed);
-    const QString path = parsed.path().toLower();
+    QString path;
+    const QString localPath = localFilePathFromValue(trimmed);
+    if (!localPath.isEmpty())
+        path = localPath.toLower();
+    else
+        path = QUrl(trimmed).path().toLower();
 
     static const std::array<const char *, 9> extensions = {
         ".png", ".apng", ".jpg", ".jpeg", ".gif",
@@ -102,16 +135,55 @@ bool isDirectImageUrl(const QString &url)
     return false;
 }
 
-QString browserRenderableUrl(const QString &url)
+QString imageMimeTypeForPath(const QString &path)
 {
-    const QString trimmed = url.trimmed();
+    const QString lower = path.toLower();
+
+    if (lower.endsWith(QStringLiteral(".png")) ||
+        lower.endsWith(QStringLiteral(".apng")))
+        return QStringLiteral("image/png");
+    if (lower.endsWith(QStringLiteral(".gif")))
+        return QStringLiteral("image/gif");
+    if (lower.endsWith(QStringLiteral(".webp")))
+        return QStringLiteral("image/webp");
+    if (lower.endsWith(QStringLiteral(".svg")))
+        return QStringLiteral("image/svg+xml");
+    if (lower.endsWith(QStringLiteral(".jpg")) ||
+        lower.endsWith(QStringLiteral(".jpeg")))
+        return QStringLiteral("image/jpeg");
+    if (lower.endsWith(QStringLiteral(".bmp")))
+        return QStringLiteral("image/bmp");
+    if (lower.endsWith(QStringLiteral(".avif")))
+        return QStringLiteral("image/avif");
+
+    return QStringLiteral("application/octet-stream");
+}
+
+QString browserRenderableUrl(const QString &value)
+{
+    const QString trimmed = value.trimmed();
     if (!isDirectImageUrl(trimmed))
         return trimmed;
 
-    // Chromium's built-in image document can supply an opaque viewer
-    // background. Wrap raw image URLs in our own transparent document so
-    // transparent PNG/GIF/WebP/SVG pixels remain transparent in the HUD.
-    QString escaped = trimmed.toHtmlEscaped();
+    QString imageSource = trimmed;
+    const QString localPath = localFilePathFromValue(trimmed);
+
+    if (!localPath.isEmpty()) {
+        QFile file(localPath);
+        if (!file.open(QIODevice::ReadOnly)) {
+            blog(LOG_WARNING,
+                 "[Clatasha HUD] Could not open local image overlay file");
+            return {};
+        }
+
+        const QByteArray bytes = file.readAll();
+        const QString mimeType = imageMimeTypeForPath(localPath);
+        imageSource =
+            QStringLiteral("data:%1;base64,%2")
+                .arg(mimeType, QString::fromLatin1(bytes.toBase64()));
+    }
+
+    QString escaped = imageSource.toHtmlEscaped();
     escaped.replace(QStringLiteral("'"), QStringLiteral("&#39;"));
 
     const QString html = QStringLiteral(
@@ -137,6 +209,23 @@ QString browserRenderableUrl(const QString &url)
 
     return QStringLiteral("data:text/html;charset=utf-8,") +
            QString::fromLatin1(QUrl::toPercentEncoding(html));
+}
+
+void applyBrowserInputSettings(obs_data_t *settings, const QString &value)
+{
+    const QString localPath = localFilePathFromValue(value);
+    const bool localNonImage = !localPath.isEmpty() && !isDirectImageUrl(value);
+
+    obs_data_set_bool(settings, "is_local_file", localNonImage);
+
+    if (localNonImage) {
+        obs_data_set_string(settings, "local_file", localPath.toUtf8().constData());
+        obs_data_set_string(settings, "url", "");
+    } else {
+        const QString renderUrl = browserRenderableUrl(value);
+        obs_data_set_string(settings, "local_file", "");
+        obs_data_set_string(settings, "url", renderUrl.toUtf8().constData());
+    }
 }
 
 
@@ -189,8 +278,7 @@ public:
         const int newHeight = qBound(80, config.height, 2160);
 
         obs_data_t *settings = obs_data_create();
-        const QString renderUrl = browserRenderableUrl(config.url);
-        obs_data_set_string(settings, "url", renderUrl.toUtf8().constData());
+        applyBrowserInputSettings(settings, config.url);
         obs_data_set_int(settings, "width", newWidth);
         obs_data_set_int(settings, "height", newHeight);
         obs_data_set_int(settings, "fps", 30);
@@ -576,8 +664,7 @@ bool applyVideoOverlays(const std::array<OverlayConfig, kOverlayCount> &configs)
         }
 
         obs_data_t *settings = obs_data_create();
-        const QString renderUrl = browserRenderableUrl(config.url);
-        obs_data_set_string(settings, "url", renderUrl.toUtf8().constData());
+        applyBrowserInputSettings(settings, config.url);
         obs_data_set_int(settings, "width", config.width);
         obs_data_set_int(settings, "height", config.height);
         obs_data_set_int(settings, "fps", 30);
@@ -1099,6 +1186,7 @@ struct OverlayRow {
     QCheckBox *enabled = nullptr;
     QLineEdit *name = nullptr;
     QLineEdit *url = nullptr;
+    QPushButton *browse = nullptr;
     QComboBox *mode = nullptr;
     QLabel *sizeLabel = nullptr;
     QPushButton *preview = nullptr;
@@ -1204,7 +1292,7 @@ static void show_settings()
     title->setFont(titleFont);
 
     auto *subtitle = new QLabel(
-        QStringLiteral("Add up to five Streamlabs, browser-widget, or direct image URLs. Transparent PNG/GIF/WebP/SVG images are automatically rendered without a browser background."),
+        QStringLiteral("Add up to five Streamlabs/browser URLs or choose local image/HTML files. Transparent local and remote images render without a browser background."),
         browserTab);
     subtitle->setWordWrap(true);
     subtitle->setProperty("muted", true);
@@ -1246,7 +1334,13 @@ static void show_settings()
         topRow->addWidget(rows[i].mode);
 
         rows[i].url = new QLineEdit(overlayConfigs[i].url, card);
-        rows[i].url->setPlaceholderText(QStringLiteral("https://streamlabs.com/..."));
+        rows[i].url->setPlaceholderText(QStringLiteral("URL or local file"));
+        rows[i].browse = new QPushButton(QStringLiteral("Browse Local…"), card);
+
+        auto *sourceRow = new QHBoxLayout();
+        sourceRow->setSpacing(7);
+        sourceRow->addWidget(rows[i].url, 1);
+        sourceRow->addWidget(rows[i].browse);
 
         auto *bottomRow = new QHBoxLayout();
         rows[i].sizeLabel = new QLabel(
@@ -1259,9 +1353,34 @@ static void show_settings()
         bottomRow->addWidget(rows[i].preview);
 
         cardLayout->addLayout(topRow);
-        cardLayout->addWidget(rows[i].url);
+        cardLayout->addLayout(sourceRow);
         cardLayout->addLayout(bottomRow);
         cards->addWidget(card);
+
+        QObject::connect(rows[i].browse, &QPushButton::clicked, &dialog, [&, i]() {
+            QString initialDirectory;
+            const QString currentLocalPath = localFilePathFromValue(rows[i].url->text());
+            if (!currentLocalPath.isEmpty())
+                initialDirectory = QFileInfo(currentLocalPath).absolutePath();
+
+            const QString path = QFileDialog::getOpenFileName(
+                &dialog,
+                QStringLiteral("Choose Local Overlay File"),
+                initialDirectory,
+                QStringLiteral(
+                    "Overlay files (*.png *.apng *.gif *.webp *.svg *.jpg *.jpeg *.bmp *.avif *.html *.htm);;"
+                    "Images (*.png *.apng *.gif *.webp *.svg *.jpg *.jpeg *.bmp *.avif);;"
+                    "HTML files (*.html *.htm);;"
+                    "All files (*.*)"));
+
+            if (!path.isEmpty()) {
+                rows[i].url->setText(QDir::toNativeSeparators(path));
+                if (rows[i].name->text().trimmed().isEmpty() ||
+                    rows[i].name->text().startsWith(QStringLiteral("Overlay "))) {
+                    rows[i].name->setText(QFileInfo(path).completeBaseName());
+                }
+            }
+        });
 
         QObject::connect(rows[i].preview, &QPushButton::clicked, &dialog, [&, i]() {
             overlayConfigs[i].enabled = rows[i].enabled->isChecked();
@@ -1282,7 +1401,7 @@ static void show_settings()
     browserLayout->addWidget(scroll, 1);
 
     auto *videoNote = new QLabel(
-        QStringLiteral("HUD overlays preserve browser transparency and stay invisible until content is rendered. Direct image URLs are wrapped in a transparent page automatically. VIDEO overlays are added to the current OBS scene when you press Apply or OK."),
+        QStringLiteral("HUD overlays preserve transparency and stay invisible until content is rendered. Direct image URLs and local image files are wrapped on a transparent canvas automatically. Local HTML files use OBS Browser Source local-file mode. VIDEO overlays are added to the current OBS scene when you press Apply or OK."),
         browserTab);
     videoNote->setWordWrap(true);
     videoNote->setProperty("accentNote", true);
