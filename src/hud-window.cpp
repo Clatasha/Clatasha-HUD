@@ -601,26 +601,26 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     p.setPen(QPen(QColor(100, 109, 116, borderAlpha), 1.0));
     p.drawPath(panel);
 
-    drawSegmentedMeter(p, 5, 6, 3, 29, desktopLevel_.load(std::memory_order_relaxed));
-    drawSegmentedMeter(p, 11, 6, 3, 29, micLevel_.load(std::memory_order_relaxed));
+    drawSegmentedMeter(p, 4, 5, 3, 29, desktopLevel_.load(std::memory_order_relaxed));
+    drawSegmentedMeter(p, 13, 5, 3, 29, micLevel_.load(std::memory_order_relaxed));
 
     // Tiny source-identification icons under the audio meters:
     // monitor for Desktop Audio, microphone for Mic/Aux.
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
-    p.setPen(QPen(QColor(174, 181, 187), 0.9));
+    p.setPen(QPen(QColor(174, 181, 187), 0.85));
     p.setBrush(Qt::NoBrush);
 
-    // Desktop monitor icon.
-    p.drawRoundedRect(QRectF(3.0, 38.0, 7.0, 5.0), 0.8, 0.8);
-    p.drawLine(QPointF(6.5, 43.0), QPointF(6.5, 45.0));
-    p.drawLine(QPointF(4.5, 45.0), QPointF(8.5, 45.0));
+    // Desktop monitor icon, deliberately separated from the microphone.
+    p.drawRoundedRect(QRectF(1.5, 37.5, 7.0, 5.0), 0.8, 0.8);
+    p.drawLine(QPointF(5.0, 42.5), QPointF(5.0, 44.5));
+    p.drawLine(QPointF(3.0, 44.5), QPointF(7.0, 44.5));
 
     // Microphone icon.
-    p.drawRoundedRect(QRectF(10.0, 37.5, 4.0, 6.0), 2.0, 2.0);
-    p.drawArc(QRectF(9.0, 40.0, 6.0, 5.0), 180 * 16, 180 * 16);
-    p.drawLine(QPointF(12.0, 45.0), QPointF(12.0, 46.5));
-    p.drawLine(QPointF(10.0, 46.5), QPointF(14.0, 46.5));
+    p.drawRoundedRect(QRectF(11.7, 37.2, 3.6, 5.8), 1.8, 1.8);
+    p.drawArc(QRectF(10.8, 39.6, 5.4, 4.8), 180 * 16, 180 * 16);
+    p.drawLine(QPointF(13.5, 44.3), QPointF(13.5, 46.0));
+    p.drawLine(QPointF(11.8, 46.0), QPointF(15.2, 46.0));
     p.restore();
 
     const bool sessionActive = recordingActive_ || streamingActive_;
