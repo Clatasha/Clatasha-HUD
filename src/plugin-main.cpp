@@ -27,6 +27,7 @@
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -79,6 +80,65 @@ struct OverlayConfig {
     int videoY = 40;
 };
 
+bool isDirectImageUrl(const QString &url)
+{
+    const QString trimmed = url.trimmed();
+    if (trimmed.startsWith(QStringLiteral("data:image/"), Qt::CaseInsensitive))
+        return true;
+
+    const QUrl parsed(trimmed);
+    const QString path = parsed.path().toLower();
+
+    static const std::array<const char *, 9> extensions = {
+        ".png", ".apng", ".jpg", ".jpeg", ".gif",
+        ".webp", ".svg", ".bmp", ".avif"
+    };
+
+    for (const char *extension : extensions) {
+        if (path.endsWith(QLatin1String(extension)))
+            return true;
+    }
+
+    return false;
+}
+
+QString browserRenderableUrl(const QString &url)
+{
+    const QString trimmed = url.trimmed();
+    if (!isDirectImageUrl(trimmed))
+        return trimmed;
+
+    // Chromium's built-in image document can supply an opaque viewer
+    // background. Wrap raw image URLs in our own transparent document so
+    // transparent PNG/GIF/WebP/SVG pixels remain transparent in the HUD.
+    QString escaped = trimmed.toHtmlEscaped();
+    escaped.replace(QStringLiteral("'"), QStringLiteral("&#39;"));
+
+    const QString html = QStringLiteral(
+        "<!doctype html>"
+        "<html>"
+        "<head>"
+        "<meta charset='utf-8'>"
+        "<style>"
+        "html,body{"
+        "width:100%%;height:100%%;margin:0;padding:0;"
+        "overflow:hidden;background:rgba(0,0,0,0)!important;"
+        "}"
+        "body{display:flex;align-items:center;justify-content:center;}"
+        "img{"
+        "display:block;max-width:100%%;max-height:100%%;"
+        "width:100%%;height:100%%;object-fit:contain;"
+        "background:transparent;"
+        "}"
+        "</style>"
+        "</head>"
+        "<body><img src='%1' alt=''></body>"
+        "</html>").arg(escaped);
+
+    return QStringLiteral("data:text/html;charset=utf-8,") +
+           QString::fromLatin1(QUrl::toPercentEncoding(html));
+}
+
 
 bool modeHasHud(OverlayMode mode);
 
@@ -129,7 +189,8 @@ public:
         const int newHeight = qBound(80, config.height, 2160);
 
         obs_data_t *settings = obs_data_create();
-        obs_data_set_string(settings, "url", config.url.toUtf8().constData());
+        const QString renderUrl = browserRenderableUrl(config.url);
+        obs_data_set_string(settings, "url", renderUrl.toUtf8().constData());
         obs_data_set_int(settings, "width", newWidth);
         obs_data_set_int(settings, "height", newHeight);
         obs_data_set_int(settings, "fps", 30);
@@ -515,7 +576,8 @@ bool applyVideoOverlays(const std::array<OverlayConfig, kOverlayCount> &configs)
         }
 
         obs_data_t *settings = obs_data_create();
-        obs_data_set_string(settings, "url", config.url.toUtf8().constData());
+        const QString renderUrl = browserRenderableUrl(config.url);
+        obs_data_set_string(settings, "url", renderUrl.toUtf8().constData());
         obs_data_set_int(settings, "width", config.width);
         obs_data_set_int(settings, "height", config.height);
         obs_data_set_int(settings, "fps", 30);
@@ -1142,7 +1204,7 @@ static void show_settings()
     title->setFont(titleFont);
 
     auto *subtitle = new QLabel(
-        QStringLiteral("Add up to five Streamlabs or browser-widget URLs. HUD shows a private desktop overlay, VIDEO adds it to the current OBS scene, and HUD / VIDEO does both."),
+        QStringLiteral("Add up to five Streamlabs, browser-widget, or direct image URLs. Transparent PNG/GIF/WebP/SVG images are automatically rendered without a browser background."),
         browserTab);
     subtitle->setWordWrap(true);
     subtitle->setProperty("muted", true);
@@ -1220,7 +1282,7 @@ static void show_settings()
     browserLayout->addWidget(scroll, 1);
 
     auto *videoNote = new QLabel(
-        QStringLiteral("HUD overlays preserve browser transparency and stay invisible until the widget renders content. VIDEO overlays are added to the current OBS scene when you press Apply or OK."),
+        QStringLiteral("HUD overlays preserve browser transparency and stay invisible until content is rendered. Direct image URLs are wrapped in a transparent page automatically. VIDEO overlays are added to the current OBS scene when you press Apply or OK."),
         browserTab);
     videoNote->setWordWrap(true);
     videoNote->setProperty("accentNote", true);
