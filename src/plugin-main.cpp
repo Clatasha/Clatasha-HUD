@@ -164,13 +164,7 @@ public:
         setStyleSheet(QStringLiteral("background: transparent;"));
     }
 
-    ~BrowserHudOverlay() override
-    {
-        if (browser_) {
-            browser_->closeBrowser();
-            browser_ = nullptr;
-        }
-    }
+    ~BrowserHudOverlay() override = default;
 
     bool applyConfig(const OverlayConfig &config)
     {
@@ -251,25 +245,33 @@ private:
 
 std::array<BrowserHudOverlay *, kOverlayCount> g_hudBrowserOverlays{};
 
+bool showHudOverlaySlot(int index, const OverlayConfig &config, bool forceVisible = false)
+{
+    if (index < 0 || index >= kOverlayCount)
+        return false;
+
+    const bool shouldShow =
+        (forceVisible || (config.enabled && modeHasHud(config.mode))) &&
+        !config.url.trimmed().isEmpty();
+
+    if (!shouldShow) {
+        if (g_hudBrowserOverlays[index])
+            g_hudBrowserOverlays[index]->hide();
+        return true;
+    }
+
+    if (!g_hudBrowserOverlays[index])
+        g_hudBrowserOverlays[index] = new BrowserHudOverlay(index);
+
+    return g_hudBrowserOverlays[index]->applyConfig(config);
+}
+
 bool applyHudOverlays(const std::array<OverlayConfig, kOverlayCount> &configs)
 {
     bool browserAvailable = true;
 
     for (int i = 0; i < kOverlayCount; ++i) {
-        const OverlayConfig &config = configs[i];
-        const bool shouldShow = config.enabled && modeHasHud(config.mode) &&
-                                !config.url.trimmed().isEmpty();
-
-        if (!shouldShow) {
-            delete g_hudBrowserOverlays[i];
-            g_hudBrowserOverlays[i] = nullptr;
-            continue;
-        }
-
-        if (!g_hudBrowserOverlays[i])
-            g_hudBrowserOverlays[i] = new BrowserHudOverlay(i);
-
-        if (!g_hudBrowserOverlays[i]->applyConfig(config))
+        if (!showHudOverlaySlot(i, configs[i], false))
             browserAvailable = false;
     }
 
@@ -442,49 +444,10 @@ public:
         setMouseTracking(true);
     }
 
-    ~OverlayPreviewCanvas() override
-    {
-        if (previewBrowser_) {
-            previewBrowser_->closeBrowser();
-            previewBrowser_ = nullptr;
-        }
-    }
-
-    void setBrowserUrl(const QString &url)
-    {
-        if (url.trimmed().isEmpty())
-            return;
-
-        QCef *engine = ensureBrowserEngine();
-        if (!engine)
-            return;
-
-        if (!previewBrowser_) {
-            previewBrowser_ = engine->create_widget(this, url.toStdString(), nullptr);
-            if (!previewBrowser_) {
-                blog(LOG_WARNING, "[Clatasha HUD] Failed to create browser preview widget");
-                return;
-            }
-
-            previewBrowser_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-            previewBrowser_->setStartupScript(
-                "document.documentElement.style.background='transparent';"
-                "if(document.body)document.body.style.background='transparent';");
-            previewBrowser_->show();
-        } else if (previewUrl_ != url) {
-            previewBrowser_->setURL(url.toStdString());
-        }
-
-        previewUrl_ = url;
-        updateBrowserGeometry();
-        update();
-    }
-
     void setGeometryData(int x, int y, int width, int height)
     {
         logicalRect_ = QRect(x, y, width, height);
         clampRect();
-        updateBrowserGeometry();
         update();
     }
 
@@ -528,13 +491,11 @@ protected:
         painter.setPen(QPen(QColor(67, 159, 255), 2));
         painter.drawRect(visual);
 
-        if (!previewBrowser_) {
-            painter.setPen(QColor(225, 232, 238));
-            painter.setFont(QFont(QStringLiteral("Segoe UI"), 10, QFont::DemiBold));
-            painter.drawText(visual.adjusted(10, 10, -10, -10),
-                             Qt::AlignCenter | Qt::TextWordWrap,
-                             label_.isEmpty() ? QStringLiteral("Browser Overlay") : label_);
-        }
+        painter.setPen(QColor(225, 232, 238));
+        painter.setFont(QFont(QStringLiteral("Segoe UI"), 10, QFont::DemiBold));
+        painter.drawText(visual.adjusted(10, 10, -10, -10),
+                         Qt::AlignCenter | Qt::TextWordWrap,
+                         label_.isEmpty() ? QStringLiteral("Browser Overlay") : label_);
 
         painter.setPen(Qt::NoPen);
         painter.setBrush(QColor(230, 235, 240));
@@ -651,12 +612,6 @@ protected:
         event->accept();
     }
 
-    void resizeEvent(QResizeEvent *event) override
-    {
-        QWidget::resizeEvent(event);
-        updateBrowserGeometry();
-    }
-
 private:
     enum class Handle {
         None,
@@ -761,21 +716,6 @@ private:
         }
     }
 
-    void updateBrowserGeometry()
-    {
-        if (!previewBrowser_)
-            return;
-
-        // Leave a small frame around the live browser so the eight resize
-        // handles stay visible and continue receiving mouse input.
-        QRect browserRect = toVisual(logicalRect_).adjusted(7, 7, -7, -7);
-        if (browserRect.width() < 1 || browserRect.height() < 1)
-            return;
-
-        previewBrowser_->setGeometry(browserRect);
-        previewBrowser_->show();
-    }
-
     void clampRect()
     {
         if (logicalRect_.width() > kCanvasWidth)
@@ -799,20 +739,20 @@ private:
     QString label_;
     Handle activeHandle_ = Handle::None;
     bool dragging_ = false;
-    QCefWidget *previewBrowser_ = nullptr;
-    QString previewUrl_;
     std::function<void(const QRect &)> changedCallback_;
 };
 
-void showOverlayPreview(QWidget *parent, OverlayConfig &config)
+void showOverlayPreview(QWidget *parent, int overlayIndex, OverlayConfig &config)
 {
+    const OverlayConfig originalConfig = config;
+
     QDialog dialog(parent);
     dialog.setWindowTitle(QStringLiteral("Clatasha Overlay Preview"));
     dialog.setModal(true);
     dialog.resize(760, 540);
 
     auto *previewNote = new QLabel(
-        QStringLiteral("Live browser content is shown inside the blue resize frame. Drag the frame or its handles to position and resize it."),
+        QStringLiteral("HUD placement is previewed live on your desktop. Drag the blue frame or its handles here and the real HUD browser overlay moves and resizes with it."),
         &dialog);
     previewNote->setWordWrap(true);
     previewNote->setStyleSheet(QStringLiteral("color:#8cc5ff; padding:2px 4px 6px 4px;"));
@@ -821,10 +761,20 @@ void showOverlayPreview(QWidget *parent, OverlayConfig &config)
     auto *hudPage = new QWidget(modeTabs);
     auto *videoPage = new QWidget(modeTabs);
 
+    auto showLiveHudPreview = [&](const QRect &rect) {
+        OverlayConfig previewConfig = config;
+        previewConfig.enabled = true;
+        previewConfig.mode = OverlayMode::Hud;
+        previewConfig.hudX = rect.x();
+        previewConfig.hudY = rect.y();
+        previewConfig.width = rect.width();
+        previewConfig.height = rect.height();
+        showHudOverlaySlot(overlayIndex, previewConfig, true);
+    };
+
     auto buildPage = [&](QWidget *page, bool video) {
         auto *canvas = new OverlayPreviewCanvas(page);
         canvas->setLabel(config.name);
-        canvas->setBrowserUrl(config.url);
 
         const QRect initial(video ? config.videoX : config.hudX,
                             video ? config.videoY : config.hudY,
@@ -846,20 +796,23 @@ void showOverlayPreview(QWidget *parent, OverlayConfig &config)
         wSpin->setValue(initial.width());
         hSpin->setValue(initial.height());
 
-        auto updateFromSpins = [=]() {
-            canvas->setGeometryData(xSpin->value(), ySpin->value(), wSpin->value(), hSpin->value());
+        auto updateFromSpins = [=, &showLiveHudPreview]() {
+            const QRect rect(xSpin->value(), ySpin->value(), wSpin->value(), hSpin->value());
+            canvas->setGeometryData(rect.x(), rect.y(), rect.width(), rect.height());
+            if (!video)
+                showLiveHudPreview(canvas->geometryData());
         };
 
         QObject::connect(xSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
-                         [=](int) { updateFromSpins(); });
+                         [=, &showLiveHudPreview](int) { updateFromSpins(); });
         QObject::connect(ySpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
-                         [=](int) { updateFromSpins(); });
+                         [=, &showLiveHudPreview](int) { updateFromSpins(); });
         QObject::connect(wSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
-                         [=](int) { updateFromSpins(); });
+                         [=, &showLiveHudPreview](int) { updateFromSpins(); });
         QObject::connect(hSpin, QOverload<int>::of(&QSpinBox::valueChanged), &dialog,
-                         [=](int) { updateFromSpins(); });
+                         [=, &showLiveHudPreview](int) { updateFromSpins(); });
 
-        canvas->setChangedCallback([=](const QRect &rect) {
+        canvas->setChangedCallback([=, &showLiveHudPreview](const QRect &rect) {
             QSignalBlocker bx(xSpin);
             QSignalBlocker by(ySpin);
             QSignalBlocker bw(wSpin);
@@ -868,6 +821,9 @@ void showOverlayPreview(QWidget *parent, OverlayConfig &config)
             ySpin->setValue(rect.y());
             wSpin->setValue(rect.width());
             hSpin->setValue(rect.height());
+
+            if (!video)
+                showLiveHudPreview(rect);
         });
 
         auto *centerButton = new QPushButton(QStringLiteral("Center"), page);
@@ -916,6 +872,9 @@ void showOverlayPreview(QWidget *parent, OverlayConfig &config)
     if (config.mode == OverlayMode::Video)
         modeTabs->setCurrentWidget(videoPage);
 
+    if (!config.url.trimmed().isEmpty())
+        showLiveHudPreview(QRect(config.hudX, config.hudY, config.width, config.height));
+
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
 
     auto *mainLayout = new QVBoxLayout(&dialog);
@@ -940,14 +899,19 @@ void showOverlayPreview(QWidget *parent, OverlayConfig &config)
         config.hudY = hudSpins[1]->value();
         config.videoX = videoSpins[0]->value();
         config.videoY = videoSpins[1]->value();
-        config.width = qBound(100, videoSpins[2]->value(), 3840);
-        config.height = qBound(80, videoSpins[3]->value(), 2160);
 
-        // Keep one shared browser size for HUD and VIDEO in the first iteration.
         if (modeTabs->currentWidget() == hudPage) {
             config.width = qBound(100, hudSpins[2]->value(), 3840);
             config.height = qBound(80, hudSpins[3]->value(), 2160);
+        } else {
+            config.width = qBound(100, videoSpins[2]->value(), 3840);
+            config.height = qBound(80, videoSpins[3]->value(), 2160);
         }
+
+        showHudOverlaySlot(overlayIndex, config, false);
+    } else {
+        config = originalConfig;
+        showHudOverlaySlot(overlayIndex, originalConfig, false);
     }
 }
 
@@ -992,7 +956,8 @@ static void show_settings()
 
     const int originalOpacity = g_hud->opacityPercent();
     const QString originalLocation = g_hud->location();
-    auto overlayConfigs = loadOverlayConfigs();
+    const auto originalOverlayConfigs = loadOverlayConfigs();
+    auto overlayConfigs = originalOverlayConfigs;
 
     QWidget *parent = static_cast<QWidget *>(obs_frontend_get_main_window());
     QDialog dialog(parent);
@@ -1124,7 +1089,7 @@ static void show_settings()
             overlayConfigs[i].url = rows[i].url->text().trimmed();
             overlayConfigs[i].mode = static_cast<OverlayMode>(rows[i].mode->currentData().toInt());
 
-            showOverlayPreview(&dialog, overlayConfigs[i]);
+            showOverlayPreview(&dialog, i, overlayConfigs[i]);
 
             rows[i].sizeLabel->setText(
                 QStringLiteral("%1 × %2").arg(overlayConfigs[i].width).arg(overlayConfigs[i].height));
@@ -1222,6 +1187,7 @@ static void show_settings()
     if (dialog.exec() != QDialog::Accepted) {
         g_hud->setOpacityPercent(originalOpacity);
         g_hud->setLocation(originalLocation);
+        applyHudOverlays(originalOverlayConfigs);
     }
 }
 
