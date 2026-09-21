@@ -5,11 +5,16 @@
 # Clatasha HUD
 
 Clatasha HUD is a Windows OBS Studio plugin that adds a compact, always-on-top status HUD for the streamer and a five-slot browser overlay manager for HUD-only, stream-only, or combined overlays.
+<p align="center">
+  <img src="assets/clatasha%20hud%20image3.jpg" width="360" alt="Clatasha HUD logo">
+</p>
 
 The plugin runs inside OBS Studio. It does not require a separate Python process.
 
 ## Current features
-
+<p align="center">
+  <img src="assets/clatasha%20hud%20image2.jpg" width="360" alt="Clatasha HUD logo">
+</p>
 ### Compact local HUD
 
 - 145 × 50 frameless, always-on-top, click-through HUD.
@@ -25,7 +30,9 @@ The plugin runs inside OBS Studio. It does not require a separate Python process
 - Windows capture-exclusion request for local HUD windows where supported.
 
 If game FPS cannot be read, Clatasha HUD displays `--` rather than substituting OBS renderer FPS.
-
+<p align="center">
+  <img src="assets/clatasha%20hud%20image.jpg" width="360" alt="Clatasha HUD logo">
+</p>
 ## Browser Overlays
 
 Clatasha HUD includes five configurable overlay slots. Each slot has:
