@@ -19,6 +19,7 @@
 #include <QGroupBox>
 #include <QGuiApplication>
 #include <QImage>
+#include <QIcon>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -31,6 +32,7 @@
 #include <QScreen>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QSize>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -1570,6 +1572,7 @@ static void show_settings()
     QWidget *parent = static_cast<QWidget *>(obs_frontend_get_main_window());
     QDialog dialog(parent);
     dialog.setWindowTitle(QStringLiteral("Clatasha HUD Settings"));
+    dialog.setWindowIcon(QIcon(QStringLiteral(":/clatasha/icons/settings.svg")));
     dialog.setModal(true);
     dialog.resize(930, 720);
     dialog.setMinimumSize(860, 640);
@@ -2037,11 +2040,18 @@ static void show_settings()
     auto *navGroup = new QButtonGroup(&dialog);
     navGroup->setExclusive(true);
 
-    auto addNavButton = [&](const QString &label, int pageIndex, bool bottom = false) {
+    auto addNavButton = [&](const QString &label,
+                            int pageIndex,
+                            const QString &iconPath,
+                            bool bottom) {
         auto *button = new QPushButton(label, sidebar);
         button->setCheckable(true);
         button->setProperty("navButton", true);
         button->setCursor(Qt::PointingHandCursor);
+        if (!iconPath.isEmpty()) {
+            button->setIcon(QIcon(iconPath));
+            button->setIconSize(QSize(18, 18));
+        }
         navGroup->addButton(button);
         if (bottom)
             sidebarLayout->addStretch();
@@ -2052,20 +2062,41 @@ static void show_settings()
         return button;
     };
 
-    auto *generalNav =
-        addNavButton(QStringLiteral("⚙   General"), generalPageIndex);
-    auto *browserNav =
-        addNavButton(QStringLiteral("▣   Browser Overlays"), browserPageIndex);
-    auto *hudNav =
-        addNavButton(QStringLiteral("▥   HUD"), hudPageIndex);
-    auto *appearanceNav =
-        addNavButton(QStringLiteral("◐   Appearance"), appearancePageIndex);
-    auto *hotkeysNav =
-        addNavButton(QStringLiteral("⌨   Hotkeys"), hotkeysPageIndex);
-    auto *advancedNav =
-        addNavButton(QStringLiteral("⚒   Advanced"), advancedPageIndex);
-    auto *aboutNav =
-        addNavButton(QStringLiteral("ⓘ   About"), aboutPageIndex, true);
+    auto *generalNav = addNavButton(
+        QStringLiteral("General"),
+        generalPageIndex,
+        QStringLiteral(":/clatasha/icons/general.svg"),
+        false);
+    auto *browserNav = addNavButton(
+        QStringLiteral("▣   Browser Overlays"),
+        browserPageIndex,
+        QString(),
+        false);
+    auto *hudNav = addNavButton(
+        QStringLiteral("HUD"),
+        hudPageIndex,
+        QStringLiteral(":/clatasha/icons/hud.svg"),
+        false);
+    auto *appearanceNav = addNavButton(
+        QStringLiteral("Appearance"),
+        appearancePageIndex,
+        QStringLiteral(":/clatasha/icons/appearance.svg"),
+        false);
+    auto *hotkeysNav = addNavButton(
+        QStringLiteral("Hotkeys"),
+        hotkeysPageIndex,
+        QStringLiteral(":/clatasha/icons/hotkeys.svg"),
+        false);
+    auto *advancedNav = addNavButton(
+        QStringLiteral("Advanced"),
+        advancedPageIndex,
+        QStringLiteral(":/clatasha/icons/advanced.svg"),
+        false);
+    auto *aboutNav = addNavButton(
+        QStringLiteral("ⓘ   About"),
+        aboutPageIndex,
+        QString(),
+        true);
 
     // Browser Overlays is the most-used configuration page and mirrors the concept.
     browserNav->setChecked(true);

@@ -1,0 +1,10 @@
+<RCC>
+  <qresource prefix="/clatasha">
+    <file alias="icons/general.svg">assets/icons/general.svg</file>
+    <file alias="icons/hud.svg">assets/icons/hud2.svg</file>
+    <file alias="icons/appearance.svg">assets/icons/appearance.svg</file>
+    <file alias="icons/hotkeys.svg">assets/icons/hotkeys.svg</file>
+    <file alias="icons/advanced.svg">assets/icons/advanced.svg</file>
+    <file alias="icons/settings.svg">assets/icons/settings.svg</file>
+  </qresource>
+</RCC>

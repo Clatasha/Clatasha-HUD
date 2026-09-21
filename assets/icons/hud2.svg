@@ -1,0 +1,12 @@
+<?xml version="1.0" ?>
+<svg fill="#ffffff" width="800px" height="800px" viewBox="0 -0.5 31.555 31.555" xmlns="http://www.w3.org/2000/svg">
+ <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 19 14" width="15" height="10">
+  <rect x="2" y="3" width="15" height="10" rx="2" fill="#2F88FF" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>
+  <text x="9.5" y="8" fill="#FFFFFF" font-size="5" font-family="sans-serif" font-weight="bold" text-anchor="middle" dominant-baseline="central">60</text>
+ </svg>
+ <g transform="translate(-289.255 -642.787)">
+  <path d="M317.868,644.787a.942.942,0,0,1,.942.942v18.357a.943.943,0,0,1-.942.942H292.2a.943.943,0,0,1-.942-.942V645.729a.942.942,0,0,1,.942-.942h25.671m0-2H292.2a2.942,2.942,0,0,0-2.942,2.942v18.357a2.942,2.942,0,0,0,2.942,2.942h25.671a2.942,2.942,0,0,0,2.942-2.942V645.729a2.942,2.942,0,0,0-2.942-2.942Z"/>
+  <rect height="6.5" transform="translate(304.033 665.834)" width="2"/>
+  <path d="M312.457,673.334H298.873a1,1,0,1,1,0-2h13.584a1,1,0,0,1,0,2Z"/>
+ </g>
+</svg>
