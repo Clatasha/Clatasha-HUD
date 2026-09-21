@@ -2649,7 +2649,7 @@ static void show_settings()
             if (!hotkeyDirty[i])
                 continue;
 
-            const obs_key_combination_t combination = hotkeyEdits[i]->combination();
+            obs_key_combination_t combination = hotkeyEdits[i]->combination();
             if (obs_key_combination_is_empty(combination))
                 obs_hotkey_load_bindings(g_hudHotkeys[i].id, nullptr, 0);
             else
