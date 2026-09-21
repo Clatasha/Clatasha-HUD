@@ -1,11 +1,15 @@
 #include <obs-module.h>
 #include <obs-frontend-api.h>
+#include <obs-hotkey.h>
+#include <obs-interaction.h>
+#include <util/dstr.h>
 
 #include <QAction>
 #include <QApplication>
 #include <QButtonGroup>
 #include <QClipboard>
 #include <QCheckBox>
+#include <QCoreApplication>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -15,11 +19,14 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFocusEvent>
 #include <QFrame>
 #include <QGroupBox>
+#include <QGridLayout>
 #include <QGuiApplication>
 #include <QImage>
 #include <QIcon>
+#include <QKeyEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -71,6 +78,7 @@ static QAction *g_settingsAction = nullptr;
 static QTimer *g_hudWatchdog = nullptr;
 static bool g_hudWantedVisible = true;
 static bool g_frontendExiting = false;
+static bool g_browserHudOverlaysWantedVisible = true;
 
 namespace {
 
@@ -598,6 +606,14 @@ bool showHudOverlaySlot(int index, const OverlayConfig &config, bool forceVisibl
 
 bool applyHudOverlays(const std::array<OverlayConfig, kOverlayCount> &configs)
 {
+    if (!g_browserHudOverlaysWantedVisible) {
+        for (BrowserHudOverlay *overlay : g_hudBrowserOverlays) {
+            if (overlay)
+                overlay->deactivate();
+        }
+        return true;
+    }
+
     bool browserAvailable = true;
 
     for (int i = 0; i < kOverlayCount; ++i) {
@@ -1610,6 +1626,339 @@ static void toggle_hud()
 #endif
 }
 
+enum class HudHotkeyAction : int {
+    ToggleHud = 0,
+    ToggleBrowserHudOverlays,
+    ToggleReplayBuffer,
+    SaveReplay,
+    ToggleRecording,
+    PauseRecording,
+    ToggleStreaming,
+    Count,
+};
+
+struct HudHotkeyDefinition {
+    const char *name = nullptr;
+    const char *description = nullptr;
+    const char *label = nullptr;
+    const char *group = nullptr;
+    obs_hotkey_id id = OBS_INVALID_HOTKEY_ID;
+};
+
+constexpr int kHudHotkeyCount = static_cast<int>(HudHotkeyAction::Count);
+
+static std::array<HudHotkeyDefinition, kHudHotkeyCount> g_hudHotkeys{{
+    {"ClatashaHUD.ToggleHUD", "Clatasha HUD: Toggle HUD", "Toggle Clatasha HUD", "HUD"},
+    {"ClatashaHUD.ToggleBrowserHudOverlays", "Clatasha HUD: Show/Hide Browser HUD Overlays", "Show/Hide Browser HUD Overlays", "HUD"},
+    {"ClatashaHUD.ToggleReplayBuffer", "Clatasha HUD: Toggle Replay Buffer", "Toggle Replay Buffer", "Replay Buffer"},
+    {"ClatashaHUD.SaveReplay", "Clatasha HUD: Save Replay", "Save Replay", "Replay Buffer"},
+    {"ClatashaHUD.ToggleRecording", "Clatasha HUD: Toggle Recording", "Toggle Recording", "Recording"},
+    {"ClatashaHUD.PauseRecording", "Clatasha HUD: Pause/Resume Recording", "Pause/Resume Recording", "Recording"},
+    {"ClatashaHUD.ToggleStreaming", "Clatasha HUD: Toggle Streaming", "Toggle Streaming", "Streaming"},
+}};
+
+static QString hotkeyCombinationText(obs_key_combination_t combination)
+{
+    if (obs_key_combination_is_empty(combination))
+        return QStringLiteral("Not set");
+
+    dstr text = {};
+    obs_key_combination_to_str(combination, &text);
+    const QString result = QString::fromUtf8(text.array ? text.array : "");
+    dstr_free(&text);
+    return result.isEmpty() ? QStringLiteral("Not set") : result;
+}
+
+struct HotkeyBindingLookup {
+    obs_hotkey_id id = OBS_INVALID_HOTKEY_ID;
+    obs_key_combination_t combination{0, OBS_KEY_NONE};
+    bool found = false;
+};
+
+static bool findHotkeyBinding(void *data, size_t, obs_hotkey_binding_t *binding)
+{
+    auto *lookup = static_cast<HotkeyBindingLookup *>(data);
+    if (!lookup || obs_hotkey_binding_get_hotkey_id(binding) != lookup->id)
+        return true;
+
+    lookup->combination = obs_hotkey_binding_get_key_combination(binding);
+    lookup->found = true;
+    return false;
+}
+
+static obs_key_combination_t currentHotkeyBinding(obs_hotkey_id id)
+{
+    HotkeyBindingLookup lookup;
+    lookup.id = id;
+    obs_enum_hotkey_bindings(findHotkeyBinding, &lookup);
+    return lookup.combination;
+}
+
+class HotkeyCaptureEdit final : public QLineEdit {
+public:
+    explicit HotkeyCaptureEdit(QWidget *parent = nullptr) : QLineEdit(parent)
+    {
+        setReadOnly(true);
+        setFocusPolicy(Qt::StrongFocus);
+        setCursor(Qt::PointingHandCursor);
+        setMinimumWidth(170);
+        setPlaceholderText(QStringLiteral("Not set"));
+    }
+
+    void setCombination(obs_key_combination_t combination)
+    {
+        combination_ = combination;
+        setText(hotkeyCombinationText(combination_));
+    }
+
+    obs_key_combination_t combination() const { return combination_; }
+
+    void clearCombination()
+    {
+        combination_ = {0, OBS_KEY_NONE};
+        setText(hotkeyCombinationText(combination_));
+        if (changedCallback)
+            changedCallback(combination_);
+    }
+
+    std::function<void(obs_key_combination_t)> changedCallback;
+
+protected:
+    void focusInEvent(QFocusEvent *event) override
+    {
+        QLineEdit::focusInEvent(event);
+        setText(QStringLiteral("Press shortcut…"));
+        selectAll();
+    }
+
+    void focusOutEvent(QFocusEvent *event) override
+    {
+        setText(hotkeyCombinationText(combination_));
+        QLineEdit::focusOutEvent(event);
+    }
+
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        QLineEdit::mousePressEvent(event);
+        setFocus(Qt::MouseFocusReason);
+        selectAll();
+    }
+
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        if (event->key() == Qt::Key_Escape) {
+            clearFocus();
+            event->accept();
+            return;
+        }
+
+        if (event->key() == Qt::Key_Backspace || event->key() == Qt::Key_Delete) {
+            clearCombination();
+            clearFocus();
+            event->accept();
+            return;
+        }
+
+        if (event->key() == Qt::Key_Shift || event->key() == Qt::Key_Control ||
+            event->key() == Qt::Key_Alt || event->key() == Qt::Key_Meta) {
+            event->accept();
+            return;
+        }
+
+        const int nativeKey = static_cast<int>(event->nativeVirtualKey());
+        const obs_key_t key = nativeKey ? obs_key_from_virtual_key(nativeKey) : OBS_KEY_NONE;
+        if (key == OBS_KEY_NONE) {
+            setText(QStringLiteral("Unsupported key"));
+            event->accept();
+            return;
+        }
+
+        uint32_t modifiers = 0;
+        const Qt::KeyboardModifiers qtModifiers = event->modifiers();
+        if (qtModifiers.testFlag(Qt::ShiftModifier))
+            modifiers |= INTERACT_SHIFT_KEY;
+        if (qtModifiers.testFlag(Qt::ControlModifier))
+            modifiers |= INTERACT_CONTROL_KEY;
+        if (qtModifiers.testFlag(Qt::AltModifier))
+            modifiers |= INTERACT_ALT_KEY;
+        if (qtModifiers.testFlag(Qt::MetaModifier))
+            modifiers |= INTERACT_COMMAND_KEY;
+
+        combination_ = {modifiers, key};
+        setText(hotkeyCombinationText(combination_));
+        if (changedCallback)
+            changedCallback(combination_);
+
+        clearFocus();
+        event->accept();
+    }
+
+private:
+    obs_key_combination_t combination_{0, OBS_KEY_NONE};
+};
+
+static void toggle_browser_hud_overlays()
+{
+    g_browserHudOverlaysWantedVisible = !g_browserHudOverlaysWantedVisible;
+
+    if (!g_browserHudOverlaysWantedVisible) {
+        for (BrowserHudOverlay *overlay : g_hudBrowserOverlays) {
+            if (overlay)
+                overlay->deactivate();
+        }
+        blog(LOG_INFO, "[Clatasha HUD] Browser HUD overlays hidden");
+        return;
+    }
+
+    applyHudOverlays(loadOverlayConfigs());
+    blog(LOG_INFO, "[Clatasha HUD] Browser HUD overlays shown");
+}
+
+static void runHotkeyActionOnUi(HudHotkeyAction action)
+{
+    if (g_frontendExiting)
+        return;
+
+    QObject *target = QCoreApplication::instance();
+    if (!target)
+        return;
+
+    QMetaObject::invokeMethod(
+        target,
+        [action]() {
+            if (g_frontendExiting)
+                return;
+
+            switch (action) {
+            case HudHotkeyAction::ToggleHud:
+                toggle_hud();
+                break;
+
+            case HudHotkeyAction::ToggleBrowserHudOverlays:
+                toggle_browser_hud_overlays();
+                break;
+
+            case HudHotkeyAction::ToggleReplayBuffer:
+                if (obs_frontend_replay_buffer_active())
+                    obs_frontend_replay_buffer_stop();
+                else
+                    obs_frontend_replay_buffer_start();
+                break;
+
+            case HudHotkeyAction::SaveReplay:
+                if (obs_frontend_replay_buffer_active())
+                    obs_frontend_replay_buffer_save();
+                break;
+
+            case HudHotkeyAction::ToggleRecording:
+                if (obs_frontend_recording_active())
+                    obs_frontend_recording_stop();
+                else
+                    obs_frontend_recording_start();
+                break;
+
+            case HudHotkeyAction::PauseRecording:
+                if (obs_frontend_recording_active())
+                    obs_frontend_recording_pause(!obs_frontend_recording_paused());
+                break;
+
+            case HudHotkeyAction::ToggleStreaming:
+                if (obs_frontend_streaming_active())
+                    obs_frontend_streaming_stop();
+                else
+                    obs_frontend_streaming_start();
+                break;
+
+            case HudHotkeyAction::Count:
+                break;
+            }
+        },
+        Qt::QueuedConnection);
+}
+
+static void hudHotkeyCallback(void *data,
+                              obs_hotkey_id,
+                              obs_hotkey_t *,
+                              bool pressed)
+{
+    if (!pressed)
+        return;
+
+    const auto action =
+        static_cast<HudHotkeyAction>(reinterpret_cast<intptr_t>(data));
+    runHotkeyActionOnUi(action);
+}
+
+static void saveHudHotkeys()
+{
+    const QString path = settingsFilePath();
+    if (path.isEmpty())
+        return;
+
+    QSettings settings(path, QSettings::IniFormat);
+    for (int i = 0; i < kHudHotkeyCount; ++i) {
+        const obs_key_combination_t combination =
+            currentHotkeyBinding(g_hudHotkeys[i].id);
+        const QString prefix = QStringLiteral("hotkeys/%1/").arg(i);
+        settings.setValue(prefix + QStringLiteral("key"),
+                          static_cast<int>(combination.key));
+        settings.setValue(prefix + QStringLiteral("modifiers"),
+                          static_cast<qulonglong>(combination.modifiers));
+    }
+    settings.sync();
+}
+
+static void loadHudHotkeys()
+{
+    const QString path = settingsFilePath();
+    if (path.isEmpty())
+        return;
+
+    QSettings settings(path, QSettings::IniFormat);
+    for (int i = 0; i < kHudHotkeyCount; ++i) {
+        const QString prefix = QStringLiteral("hotkeys/%1/").arg(i);
+        if (!settings.contains(prefix + QStringLiteral("key")))
+            continue;
+
+        obs_key_combination_t combination{};
+        combination.key = static_cast<obs_key_t>(
+            settings.value(prefix + QStringLiteral("key"),
+                           static_cast<int>(OBS_KEY_NONE)).toInt());
+        combination.modifiers = static_cast<uint32_t>(
+            settings.value(prefix + QStringLiteral("modifiers"), 0).toULongLong());
+
+        if (obs_key_combination_is_empty(combination))
+            obs_hotkey_load_bindings(g_hudHotkeys[i].id, nullptr, 0);
+        else
+            obs_hotkey_load_bindings(g_hudHotkeys[i].id, &combination, 1);
+    }
+}
+
+static void registerHudHotkeys()
+{
+    for (int i = 0; i < kHudHotkeyCount; ++i) {
+        g_hudHotkeys[i].id = obs_hotkey_register_frontend(
+            g_hudHotkeys[i].name,
+            g_hudHotkeys[i].description,
+            hudHotkeyCallback,
+            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+    }
+
+    loadHudHotkeys();
+}
+
+static void unregisterHudHotkeys()
+{
+    saveHudHotkeys();
+
+    for (HudHotkeyDefinition &hotkey : g_hudHotkeys) {
+        if (hotkey.id != OBS_INVALID_HOTKEY_ID) {
+            obs_hotkey_unregister(hotkey.id);
+            hotkey.id = OBS_INVALID_HOTKEY_ID;
+        }
+    }
+}
+
 static void show_settings()
 {
     ensure_hud();
@@ -1868,13 +2217,90 @@ static void show_settings()
             "HUD opacity and screen-corner placement are available on the <b>HUD</b> page. "
             "This page is ready for future theme and visual options."));
 
-    auto *hotkeysPage = makeInfoPage(
-        QStringLiteral("Hotkeys"),
-        QStringLiteral("Keyboard control for Clatasha HUD."),
+    auto *hotkeysPage = new QWidget(pages);
+    auto *hotkeysLayout = new QVBoxLayout(hotkeysPage);
+    hotkeysLayout->setContentsMargins(18, 18, 18, 18);
+    hotkeysLayout->setSpacing(12);
+
+    auto *hotkeysTitle = new QLabel(QStringLiteral("Hotkeys"), hotkeysPage);
+    QFont hotkeysTitleFont = hotkeysTitle->font();
+    hotkeysTitleFont.setPointSize(15);
+    hotkeysTitleFont.setBold(true);
+    hotkeysTitle->setFont(hotkeysTitleFont);
+
+    auto *hotkeysSubtitle = new QLabel(
         QStringLiteral(
-            "Custom Clatasha HUD hotkeys are not registered yet. "
-            "This page is reserved for HUD visibility, overlay controls, and other "
-            "keyboard actions as they are added."));
+            "Shortcuts for the OBS actions Clatasha HUD monitors and controls. "
+            "These are real OBS frontend hotkeys and also appear in OBS Settings → Hotkeys."),
+        hotkeysPage);
+    hotkeysSubtitle->setWordWrap(true);
+    hotkeysSubtitle->setProperty("muted", true);
+
+    hotkeysLayout->addWidget(hotkeysTitle);
+    hotkeysLayout->addWidget(hotkeysSubtitle);
+
+    std::array<HotkeyCaptureEdit *, kHudHotkeyCount> hotkeyEdits{};
+    std::array<bool, kHudHotkeyCount> hotkeyDirty{};
+
+    QString lastGroup;
+    QGroupBox *currentHotkeyGroup = nullptr;
+    QGridLayout *currentHotkeyGrid = nullptr;
+    int currentHotkeyRow = 0;
+
+    for (int i = 0; i < kHudHotkeyCount; ++i) {
+        const QString groupName = QString::fromUtf8(g_hudHotkeys[i].group);
+        if (groupName != lastGroup) {
+            currentHotkeyGroup = new QGroupBox(groupName, hotkeysPage);
+            currentHotkeyGrid = new QGridLayout(currentHotkeyGroup);
+            currentHotkeyGrid->setContentsMargins(14, 20, 14, 14);
+            currentHotkeyGrid->setHorizontalSpacing(8);
+            currentHotkeyGrid->setVerticalSpacing(8);
+            currentHotkeyGrid->setColumnStretch(0, 1);
+            currentHotkeyRow = 0;
+            hotkeysLayout->addWidget(currentHotkeyGroup);
+            lastGroup = groupName;
+        }
+
+        auto *label = new QLabel(
+            QString::fromUtf8(g_hudHotkeys[i].label),
+            currentHotkeyGroup);
+
+        auto *capture = new HotkeyCaptureEdit(currentHotkeyGroup);
+        capture->setCombination(currentHotkeyBinding(g_hudHotkeys[i].id));
+        hotkeyEdits[i] = capture;
+        capture->changedCallback = [&, i](obs_key_combination_t) {
+            hotkeyDirty[i] = true;
+        };
+
+        auto *changeButton =
+            new QPushButton(QStringLiteral("Change"), currentHotkeyGroup);
+        auto *clearButton =
+            new QPushButton(QStringLiteral("Clear"), currentHotkeyGroup);
+
+        QObject::connect(changeButton, &QPushButton::clicked, &dialog, [capture]() {
+            capture->setFocus(Qt::ShortcutFocusReason);
+            capture->selectAll();
+        });
+        QObject::connect(clearButton, &QPushButton::clicked, &dialog, [capture]() {
+            capture->clearCombination();
+        });
+
+        currentHotkeyGrid->addWidget(label, currentHotkeyRow, 0);
+        currentHotkeyGrid->addWidget(capture, currentHotkeyRow, 1);
+        currentHotkeyGrid->addWidget(changeButton, currentHotkeyRow, 2);
+        currentHotkeyGrid->addWidget(clearButton, currentHotkeyRow, 3);
+        ++currentHotkeyRow;
+    }
+
+    auto *hotkeyNote = new QLabel(
+        QStringLiteral(
+            "No shortcuts are assigned by default. Click Change and press a shortcut. "
+            "Delete or Backspace clears the selected binding."),
+        hotkeysPage);
+    hotkeyNote->setWordWrap(true);
+    hotkeyNote->setProperty("accentNote", true);
+    hotkeysLayout->addWidget(hotkeyNote);
+    hotkeysLayout->addStretch();
 
     auto *advancedPage = makeInfoPage(
         QStringLiteral("Advanced"),
@@ -2196,6 +2622,43 @@ static void show_settings()
 
     auto applySettings = [&]() -> bool {
         syncRowsToConfigs();
+
+        // Prevent two Clatasha actions from accidentally sharing the same
+        // shortcut. OBS permits this, but it would trigger both actions.
+        for (int i = 0; i < kHudHotkeyCount; ++i) {
+            const obs_key_combination_t a = hotkeyEdits[i]->combination();
+            if (obs_key_combination_is_empty(a))
+                continue;
+
+            for (int j = i + 1; j < kHudHotkeyCount; ++j) {
+                const obs_key_combination_t b = hotkeyEdits[j]->combination();
+                if (a.key == b.key && a.modifiers == b.modifiers) {
+                    QMessageBox::warning(
+                        &dialog,
+                        QStringLiteral("Duplicate Clatasha HUD Hotkey"),
+                        QStringLiteral("%1 and %2 are using the same shortcut: %3")
+                            .arg(QString::fromUtf8(g_hudHotkeys[i].label))
+                            .arg(QString::fromUtf8(g_hudHotkeys[j].label))
+                            .arg(hotkeyCombinationText(a)));
+                    return false;
+                }
+            }
+        }
+
+        for (int i = 0; i < kHudHotkeyCount; ++i) {
+            if (!hotkeyDirty[i])
+                continue;
+
+            const obs_key_combination_t combination = hotkeyEdits[i]->combination();
+            if (obs_key_combination_is_empty(combination))
+                obs_hotkey_load_bindings(g_hudHotkeys[i].id, nullptr, 0);
+            else
+                obs_hotkey_load_bindings(g_hudHotkeys[i].id, &combination, 1);
+
+            hotkeyDirty[i] = false;
+        }
+
+        saveHudHotkeys();
         g_hud->saveSettings();
         saveOverlayConfigs(overlayConfigs);
 
@@ -2345,6 +2808,7 @@ bool obs_module_load(void)
 
     g_frontendExiting = false;
     obs_frontend_add_event_callback(on_frontend_event, nullptr);
+    registerHudHotkeys();
 
     g_toolsAction = static_cast<QAction *>(
         obs_frontend_add_tools_menu_qaction(obs_module_text("ClatashaHUD.Menu")));
@@ -2362,6 +2826,7 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
     g_hudWantedVisible = false;
+    unregisterHudHotkeys();
     if (!g_frontendExiting)
         obs_frontend_remove_event_callback(on_frontend_event, nullptr);
     destroyHudOverlays();
