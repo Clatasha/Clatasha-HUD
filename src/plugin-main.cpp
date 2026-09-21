@@ -1,6 +1,5 @@
 #include <obs-module.h>
 #include <obs-frontend-api.h>
-#include <util/platform.h>
 
 #include <QAction>
 #include <QCheckBox>
@@ -11,6 +10,7 @@
 #include <QFrame>
 #include <QGroupBox>
 #include <QGuiApplication>
+#include <QImage>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -31,6 +31,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstring>
 #include <functional>
 #include <string>
 
@@ -58,29 +60,6 @@ namespace {
 constexpr int kOverlayCount = 5;
 constexpr int kCanvasWidth = 1920;
 constexpr int kCanvasHeight = 1080;
-constexpr int kHudChromaR = 1;
-constexpr int kHudChromaG = 2;
-constexpr int kHudChromaB = 3;
-
-const char *kHudChromaScript = R"JS(
-(() => {
-    const id = 'clatasha-hud-chroma-style';
-    let style = document.getElementById(id);
-    if (!style) {
-        style = document.createElement('style');
-        style.id = id;
-        (document.head || document.documentElement).appendChild(style);
-    }
-    style.textContent =
-        'html, body { background: rgb(1, 2, 3) !important; ' +
-        'background-color: rgb(1, 2, 3) !important; }';
-    if (document.documentElement)
-        document.documentElement.style.setProperty('background-color', 'rgb(1, 2, 3)', 'important');
-    if (document.body)
-        document.body.style.setProperty('background-color', 'rgb(1, 2, 3)', 'important');
-})();
-)JS";
-
 enum class OverlayMode {
     Hud = 0,
     Video = 1,
@@ -103,72 +82,6 @@ struct OverlayConfig {
 
 bool modeHasHud(OverlayMode mode);
 
-struct QCefCookieManager;
-
-class QCefWidget : public QWidget {
-public:
-    explicit QCefWidget(QWidget *parent = nullptr) : QWidget(parent) {}
-    virtual void setURL(const std::string &url) = 0;
-    virtual void setStartupScript(const std::string &script) = 0;
-    virtual void allowAllPopups(bool allow) = 0;
-    virtual void closeBrowser() = 0;
-    virtual void reloadPage() = 0;
-    virtual bool zoomPage(int direction) = 0;
-    virtual void executeJavaScript(const std::string &script) = 0;
-};
-
-struct QCef {
-    virtual ~QCef() = default;
-    virtual bool init_browser(void) = 0;
-    virtual bool initialized(void) = 0;
-    virtual bool wait_for_browser_init(void) = 0;
-    virtual QCefWidget *create_widget(QWidget *parent, const std::string &url,
-                                      QCefCookieManager *cookieManager = nullptr) = 0;
-};
-
-QCef *g_browserEngine = nullptr;
-
-QCef *ensureBrowserEngine()
-{
-    if (g_browserEngine)
-        return g_browserEngine;
-
-    obs_module_t *browserModule = obs_get_module("obs-browser");
-    if (!browserModule) {
-        blog(LOG_WARNING, "[Clatasha HUD] obs-browser module is unavailable for HUD overlays");
-        return nullptr;
-    }
-
-    void *library = obs_get_module_lib(browserModule);
-    if (!library) {
-        blog(LOG_WARNING, "[Clatasha HUD] obs-browser library handle is unavailable");
-        return nullptr;
-    }
-
-    using CreateQCefFn = QCef *(*)();
-    auto createQCef =
-        reinterpret_cast<CreateQCefFn>(os_dlsym(library, "obs_browser_create_qcef"));
-    if (!createQCef) {
-        blog(LOG_WARNING, "[Clatasha HUD] obs-browser QCEF interface is unavailable");
-        return nullptr;
-    }
-
-    g_browserEngine = createQCef();
-    if (!g_browserEngine)
-        return nullptr;
-
-    if (!g_browserEngine->initialized()) {
-        g_browserEngine->init_browser();
-        if (!g_browserEngine->wait_for_browser_init()) {
-            blog(LOG_WARNING, "[Clatasha HUD] Browser engine failed to initialize");
-            return nullptr;
-        }
-    }
-
-    blog(LOG_INFO, "[Clatasha HUD] Browser HUD engine initialized");
-    return g_browserEngine;
-}
-
 class BrowserHudOverlay final : public QWidget {
 public:
     explicit BrowserHudOverlay(int index)
@@ -178,43 +91,85 @@ public:
         setWindowTitle(QStringLiteral("Clatasha HUD Browser %1").arg(index + 1));
         setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
                        Qt::WindowDoesNotAcceptFocus);
-        setAttribute(Qt::WA_NoSystemBackground, false);
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        setAttribute(Qt::WA_NoSystemBackground, true);
         setAttribute(Qt::WA_TransparentForMouseEvents, true);
         setAttribute(Qt::WA_NativeWindow, true);
         setWindowFlag(Qt::WindowTransparentForInput, true);
-        setStyleSheet(QStringLiteral("background: rgb(1, 2, 3);"));
+        setAutoFillBackground(false);
+
+        obs_add_tick_callback(&BrowserHudOverlay::renderTick, this);
     }
 
-    ~BrowserHudOverlay() override = default;
+    ~BrowserHudOverlay() override
+    {
+        obs_remove_tick_callback(&BrowserHudOverlay::renderTick, this);
+
+        if (source_) {
+            if (sourceShowing_)
+                obs_source_dec_showing(source_);
+            obs_source_release(source_);
+            source_ = nullptr;
+        }
+
+        obs_enter_graphics();
+        gs_stagesurface_destroy(stageSurface_);
+        stageSurface_ = nullptr;
+        gs_texrender_destroy(texRender_);
+        texRender_ = nullptr;
+        obs_leave_graphics();
+    }
 
     bool applyConfig(const OverlayConfig &config)
     {
-        QCef *engine = ensureBrowserEngine();
-        if (!engine)
+        if (config.url.trimmed().isEmpty())
             return false;
 
-        const std::string url = config.url.toStdString();
+        const int newWidth = qBound(100, config.width, 3840);
+        const int newHeight = qBound(80, config.height, 2160);
 
-        if (!browser_) {
-            browser_ = engine->create_widget(this, url, nullptr);
-            if (!browser_) {
-                blog(LOG_WARNING, "[Clatasha HUD] Failed to create HUD browser widget %d", index_ + 1);
+        obs_data_t *settings = obs_data_create();
+        obs_data_set_string(settings, "url", config.url.toUtf8().constData());
+        obs_data_set_int(settings, "width", newWidth);
+        obs_data_set_int(settings, "height", newHeight);
+        obs_data_set_int(settings, "fps", 30);
+        obs_data_set_bool(settings, "shutdown", false);
+        obs_data_set_bool(settings, "restart_when_active", false);
+        obs_data_set_string(
+            settings,
+            "css",
+            "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }");
+
+        if (!source_) {
+            const QByteArray sourceName =
+                QStringLiteral("Clatasha HUD Private Browser %1").arg(index_ + 1).toUtf8();
+            source_ =
+                obs_source_create_private("browser_source", sourceName.constData(), settings);
+            if (!source_) {
+                obs_data_release(settings);
+                blog(LOG_WARNING,
+                     "[Clatasha HUD] Failed to create private browser_source for HUD overlay %d",
+                     index_ + 1);
                 return false;
             }
 
-            browser_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-            browser_->setStyleSheet(QStringLiteral("background: rgb(1, 2, 3);"));
-            browser_->setStartupScript(kHudChromaScript);
-            browser_->show();
-        } else if (config.url != url_) {
-            browser_->setURL(url);
+            obs_source_inc_showing(source_);
+            sourceShowing_ = true;
+        } else {
+            obs_source_update(source_, settings);
+            if (!sourceShowing_) {
+                obs_source_inc_showing(source_);
+                sourceShowing_ = true;
+            }
         }
 
-        url_ = config.url;
-        positionFromConfig(config);
+        obs_data_release(settings);
 
-        browser_->setGeometry(rect());
-        browser_->executeJavaScript(kHudChromaScript);
+        renderWidth_.store(newWidth, std::memory_order_relaxed);
+        renderHeight_.store(newHeight, std::memory_order_relaxed);
+        active_.store(true, std::memory_order_release);
+
+        positionFromConfig(config);
         show();
         raise();
 
@@ -222,18 +177,8 @@ public:
         const HWND hwnd = reinterpret_cast<HWND>(winId());
         if (hwnd) {
             LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            exStyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+            exStyle |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exStyle);
-
-            if (!SetLayeredWindowAttributes(
-                    hwnd,
-                    RGB(kHudChromaR, kHudChromaG, kHudChromaB),
-                    0,
-                    LWA_COLORKEY)) {
-                blog(LOG_WARNING,
-                     "[Clatasha HUD] HUD chroma transparency failed for browser %d: %lu",
-                     index_ + 1, GetLastError());
-            }
 
             if (!SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)) {
                 blog(LOG_DEBUG,
@@ -246,15 +191,140 @@ public:
         return true;
     }
 
-protected:
-    void resizeEvent(QResizeEvent *event) override
+    void deactivate()
     {
-        QWidget::resizeEvent(event);
-        if (browser_)
-            browser_->setGeometry(rect());
+        active_.store(false, std::memory_order_release);
+        hide();
+        frame_ = QImage();
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.fillRect(rect(), Qt::transparent);
+
+        if (!frame_.isNull()) {
+            painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            painter.drawImage(rect(), frame_);
+        }
     }
 
 private:
+    static void renderTick(void *param, float seconds)
+    {
+        auto *self = static_cast<BrowserHudOverlay *>(param);
+        if (!self || !self->active_.load(std::memory_order_acquire) || !self->source_)
+            return;
+
+        self->renderAccumulator_ += seconds;
+        if (self->renderAccumulator_ < (1.0f / 30.0f))
+            return;
+
+        self->renderAccumulator_ = 0.0f;
+
+        if (self->frameQueued_.load(std::memory_order_acquire))
+            return;
+
+        self->renderFrame();
+    }
+
+    void renderFrame()
+    {
+        const int width = renderWidth_.load(std::memory_order_relaxed);
+        const int height = renderHeight_.load(std::memory_order_relaxed);
+
+        if (!source_ || width <= 0 || height <= 0)
+            return;
+
+        QImage image;
+
+        obs_enter_graphics();
+
+        if (!texRender_)
+            texRender_ = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
+
+        if (!stageSurface_ || stageWidth_ != width || stageHeight_ != height) {
+            gs_stagesurface_destroy(stageSurface_);
+            stageSurface_ = gs_stagesurface_create(
+                static_cast<uint32_t>(width),
+                static_cast<uint32_t>(height),
+                GS_BGRA);
+            stageWidth_ = width;
+            stageHeight_ = height;
+        }
+
+        if (texRender_ && stageSurface_) {
+            gs_texrender_reset(texRender_);
+
+            if (gs_texrender_begin(
+                    texRender_,
+                    static_cast<uint32_t>(width),
+                    static_cast<uint32_t>(height))) {
+                vec4 clearColor;
+                vec4_zero(&clearColor);
+                gs_clear(GS_CLEAR_COLOR, &clearColor, 0.0f, 0);
+
+                gs_viewport_push();
+                gs_projection_push();
+
+                gs_ortho(
+                    0.0f,
+                    static_cast<float>(width),
+                    0.0f,
+                    static_cast<float>(height),
+                    -100.0f,
+                    100.0f);
+                gs_set_viewport(0, 0, width, height);
+
+                obs_source_video_render(source_);
+
+                gs_projection_pop();
+                gs_viewport_pop();
+                gs_texrender_end(texRender_);
+
+                gs_stage_texture(stageSurface_, gs_texrender_get_texture(texRender_));
+
+                uint8_t *data = nullptr;
+                uint32_t linesize = 0;
+                if (gs_stagesurface_map(stageSurface_, &data, &linesize)) {
+                    image = QImage(
+                        width,
+                        height,
+                        QImage::Format_ARGB32_Premultiplied);
+
+                    const size_t rowBytes = static_cast<size_t>(width) * 4;
+                    for (int y = 0; y < height; ++y) {
+                        std::memcpy(
+                            image.scanLine(y),
+                            data + static_cast<size_t>(y) * linesize,
+                            rowBytes);
+                    }
+
+                    gs_stagesurface_unmap(stageSurface_);
+                }
+            }
+        }
+
+        obs_leave_graphics();
+
+        if (image.isNull())
+            return;
+
+        frameQueued_.store(true, std::memory_order_release);
+        QMetaObject::invokeMethod(
+            this,
+            [this, image = std::move(image)]() mutable {
+                frame_ = std::move(image);
+                frameQueued_.store(false, std::memory_order_release);
+                update();
+            },
+            Qt::QueuedConnection);
+    }
+
     void positionFromConfig(const OverlayConfig &config)
     {
         QScreen *screen = QGuiApplication::primaryScreen();
@@ -274,8 +344,21 @@ private:
     }
 
     int index_ = 0;
-    QCefWidget *browser_ = nullptr;
-    QString url_;
+    obs_source_t *source_ = nullptr;
+    bool sourceShowing_ = false;
+
+    gs_texrender_t *texRender_ = nullptr;
+    gs_stagesurf_t *stageSurface_ = nullptr;
+    int stageWidth_ = 0;
+    int stageHeight_ = 0;
+
+    std::atomic_bool active_{false};
+    std::atomic_bool frameQueued_{false};
+    std::atomic_int renderWidth_{600};
+    std::atomic_int renderHeight_{300};
+    float renderAccumulator_ = 0.0f;
+
+    QImage frame_;
 };
 
 std::array<BrowserHudOverlay *, kOverlayCount> g_hudBrowserOverlays{};
@@ -291,7 +374,7 @@ bool showHudOverlaySlot(int index, const OverlayConfig &config, bool forceVisibl
 
     if (!shouldShow) {
         if (g_hudBrowserOverlays[index])
-            g_hudBrowserOverlays[index]->hide();
+            g_hudBrowserOverlays[index]->deactivate();
         return true;
     }
 
@@ -787,7 +870,7 @@ void showOverlayPreview(QWidget *parent, int overlayIndex, OverlayConfig &config
     dialog.resize(760, 540);
 
     auto *previewNote = new QLabel(
-        QStringLiteral("HUD placement is previewed live on your desktop. Drag the blue frame or its handles here and the real HUD browser overlay moves and resizes with it."),
+        QStringLiteral("The blue frame is only an editor guide. Drag it or its handles to position and resize the HUD overlay. Transparent widgets remain invisible on your desktop until they are triggered."),
         &dialog);
     previewNote->setWordWrap(true);
     previewNote->setStyleSheet(QStringLiteral("color:#8cc5ff; padding:2px 4px 6px 4px;"));
@@ -1137,7 +1220,7 @@ static void show_settings()
     browserLayout->addWidget(scroll, 1);
 
     auto *videoNote = new QLabel(
-        QStringLiteral("HUD overlays appear on your desktop and are excluded from Windows capture when supported. VIDEO overlays are added to the current OBS scene when you press Apply or OK."),
+        QStringLiteral("HUD overlays preserve browser transparency and stay invisible until the widget renders content. VIDEO overlays are added to the current OBS scene when you press Apply or OK."),
         browserTab);
     videoNote->setWordWrap(true);
     videoNote->setProperty("accentNote", true);
