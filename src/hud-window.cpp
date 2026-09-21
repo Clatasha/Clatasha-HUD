@@ -724,15 +724,15 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
 
         p.setPen(Qt::NoPen);
         p.setBrush(QColor(255, 204, 64, glowAlpha));
-        p.drawEllipse(QPointF(137.0, 29.5), 6.5 + wave, 7.0 + wave);
+        p.drawEllipse(QPointF(135.0, 29.5), 6.5 + wave, 7.0 + wave);
 
         QPainterPath bolt;
-        bolt.moveTo(137.4, 21.0);
-        bolt.lineTo(132.7, 29.4);
-        bolt.lineTo(136.2, 29.4);
-        bolt.lineTo(134.4, 37.2);
-        bolt.lineTo(141.4, 27.1);
-        bolt.lineTo(137.8, 27.1);
+        bolt.moveTo(135.4, 21.0);
+        bolt.lineTo(130.7, 29.4);
+        bolt.lineTo(134.2, 29.4);
+        bolt.lineTo(132.4, 37.2);
+        bolt.lineTo(139.4, 27.1);
+        bolt.lineTo(135.8, 27.1);
         bolt.closeSubpath();
 
         p.setPen(QPen(QColor(255, 248, 212, boltAlpha), 0.75));
@@ -744,7 +744,7 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
         const double glintY = 23.0 + std::fmod(replayShimmerTicks_ * 0.85, 10.0);
         p.setPen(Qt::NoPen);
         p.setBrush(QColor(255, 255, 255, 150 + static_cast<int>(90.0 * wave)));
-        p.drawEllipse(QPointF(138.7, glintY), 0.85, 0.85);
+        p.drawEllipse(QPointF(136.7, glintY), 0.85, 0.85);
 
         p.restore();
     }
