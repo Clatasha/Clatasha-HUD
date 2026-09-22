@@ -1,0 +1,94 @@
+name: Publish Clatasha HUD v0.1.0
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-v0.1.0.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Download verified Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: Clatasha-HUD-Windows-x64-OBS-root
+          path: package
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 35643235216
+
+      - name: Package release ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "package\*" -DestinationPath "Clatasha-HUD-OBS-0.1.0-Windows-x64.zip" -Force
+
+      - name: Write release notes
+        shell: pwsh
+        run: |
+          @'
+          ## Clatasha HUD 0.1.0
+
+          First public release of **Clatasha HUD**, a Windows OBS Studio plugin that gives the streamer a compact private status overlay plus configurable browser HUD overlays.
+
+          ### Included in 0.1.0
+          - Compact 145 × 50 always-on-top, click-through status HUD.
+          - Foreground game/application FPS through the Clatasha DXGI ETW helper.
+          - OBS renderer FPS, Desktop Audio and Mic/Aux meters, session timer, and recording-drive free space.
+          - Recording/streaming activity status.
+          - Replay Buffer lightning indicator with a subtle shimmer while Replay Buffer is active.
+          - Five browser overlay slots with HUD, VIDEO, or HUD / VIDEO modes.
+          - Browser overlay preview/editor with drag, resize, independent HUD/VIDEO placement, and ratio locking.
+          - Transparent browser widget and direct-image rendering.
+          - Local image and HTML overlay support.
+          - Editable Clatasha HUD hotkeys for HUD visibility, browser HUD overlays, Replay Buffer, recording, and streaming.
+          - Resizable settings window with branded navigation and scrollable Hotkeys controls.
+          - HUD visibility recovery and safer OBS/CEF shutdown handling.
+
+          ### Hotkey actions
+          - Toggle Clatasha HUD
+          - Show/Hide Browser HUD Overlays
+          - Toggle Replay Buffer
+          - Save Replay
+          - Toggle Recording
+          - Pause/Resume Recording
+          - Toggle Streaming
+
+          Hotkeys are unassigned by default and can be configured in **Clatasha HUD Settings → Hotkeys** or through OBS's Hotkeys settings.
+
+          ### Requirements
+          - Windows 10 or Windows 11 x64
+          - OBS Studio with Browser Source enabled for browser overlays
+          - Current testing is on OBS Studio 32.2.2
+
+          ### Installation
+          1. Close OBS Studio.
+          2. Extract **Clatasha-HUD-OBS-0.1.0-Windows-x64.zip** directly into the OBS installation directory, normally `C:\Program Files\obs-studio`.
+          3. Restart OBS Studio.
+          4. Open Clatasha HUD from the **Tools** menu.
+
+          The ZIP already uses the OBS installation-root folder structure.
+
+          ### Notes
+          - The game FPS backend is DXGI-focused. Vulkan/OpenGL titles may display `--`.
+          - The FPS helper may request administrator permission when its ETW session starts.
+          - Third-party browser widgets connect to their own services through OBS Browser Source.
+          '@ | Set-Content -Path "release-notes.md" -Encoding UTF8
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v0.1.0" "Clatasha-HUD-OBS-0.1.0-Windows-x64.zip#Windows x64 OBS installation package" `
+            --repo "${{ github.repository }}" `
+            --target "d28e7c6f4c5c9e6a5c25e7bcc603000cd8e15b72" `
+            --title "Clatasha HUD - OBS Status Overlay 0.1.0" `
+            --notes-file "release-notes.md"
