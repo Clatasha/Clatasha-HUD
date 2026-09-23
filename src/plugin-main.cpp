@@ -2961,7 +2961,7 @@ static void show_settings()
         QStringLiteral("About"),
         QStringLiteral("Clatasha HUD"),
         QStringLiteral(
-            "<b>Clatasha HUD v0.1.0</b><br>"
+            "<b>Clatasha HUD v0.2.0</b><br>"
             "Stream Smarter. Create More.<br><br>"
             "<a href='https://github.com/Clatasha/Clatasha-HUD'>GitHub project</a><br><br>"
             "Built as part of the Clatasha creator-tool ecosystem."));
@@ -3009,7 +3009,7 @@ static void show_settings()
     brandTextLayout->addWidget(brandSlogan);
     brandTextLayout->addStretch();
 
-    auto *versionLabel = new QLabel(QStringLiteral("v0.1.0"), header);
+    auto *versionLabel = new QLabel(QStringLiteral("v0.2.0"), header);
     versionLabel->setObjectName(QStringLiteral("versionLabel"));
 
     auto *donateButton = new QPushButton(QStringLiteral("♥  Donate"), header);
