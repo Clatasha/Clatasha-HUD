@@ -56,13 +56,13 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <vector>
 
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
 #ifndef WDA_EXCLUDEFROMCAPTURE
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
 #endif
@@ -130,7 +130,7 @@ struct GameBorderlessState {
 GameBorderlessState g_gameBorderless;
 HWND g_lastExternalForegroundWindow = nullptr;
 bool g_keepGameBorderlessApplied = true;
-std::vector<HWND> g_hiddenGameTaskbars;
+bool g_taskbarAutoHideChangedByClatasha = false;
 #endif
 
 QString localFilePathFromValue(const QString &value)
@@ -775,67 +775,73 @@ void saveGameWindowSettings()
     settings.sync();
 }
 
-bool isWindowsTaskbarWindow(HWND hwnd)
+bool taskbarAutoHideEnabled()
 {
-    if (!hwnd || !IsWindow(hwnd))
+    APPBARDATA data{};
+    data.cbSize = sizeof(data);
+    const UINT state =
+        static_cast<UINT>(SHAppBarMessage(ABM_GETSTATE, &data));
+    return (state & ABS_AUTOHIDE) != 0;
+}
+
+bool setTaskbarAutoHideEnabled(bool enabled)
+{
+    HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!taskbar)
         return false;
 
-    wchar_t className[128] = {};
-    if (!GetClassNameW(hwnd, className, static_cast<int>(std::size(className))))
-        return false;
+    APPBARDATA data{};
+    data.cbSize = sizeof(data);
+    data.hWnd = taskbar;
 
-    return wcscmp(className, L"Shell_TrayWnd") == 0 ||
-           wcscmp(className, L"Shell_SecondaryTrayWnd") == 0;
+    const UINT current =
+        static_cast<UINT>(SHAppBarMessage(ABM_GETSTATE, &data));
+    UINT desired = current;
+    if (enabled)
+        desired |= ABS_AUTOHIDE;
+    else
+        desired &= ~ABS_AUTOHIDE;
+
+    if (desired == current)
+        return true;
+
+    data.lParam = static_cast<LPARAM>(desired);
+    SHAppBarMessage(ABM_SETSTATE, &data);
+    return taskbarAutoHideEnabled() == enabled;
 }
 
-void restoreHiddenGameTaskbars()
+void enableTemporaryTaskbarAutoHide()
 {
-    for (HWND taskbar : g_hiddenGameTaskbars) {
-        if (taskbar && IsWindow(taskbar))
-            ShowWindow(taskbar, SW_SHOWNOACTIVATE);
-    }
-    g_hiddenGameTaskbars.clear();
-}
-
-BOOL CALLBACK hideTaskbarEnumProc(HWND hwnd, LPARAM param)
-{
-    if (!isWindowsTaskbarWindow(hwnd))
-        return TRUE;
-
-    const HMONITOR targetMonitor =
-        reinterpret_cast<HMONITOR>(param);
-    const HMONITOR taskbarMonitor =
-        MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-
-    if (taskbarMonitor != targetMonitor)
-        return TRUE;
-
-    if (IsWindowVisible(hwnd)) {
-        if (std::find(
-                g_hiddenGameTaskbars.begin(),
-                g_hiddenGameTaskbars.end(),
-                hwnd) == g_hiddenGameTaskbars.end()) {
-            g_hiddenGameTaskbars.push_back(hwnd);
-        }
-        ShowWindow(hwnd, SW_HIDE);
+    if (taskbarAutoHideEnabled()) {
+        g_taskbarAutoHideChangedByClatasha = false;
+        return;
     }
 
-    return TRUE;
+    if (setTaskbarAutoHideEnabled(true)) {
+        g_taskbarAutoHideChangedByClatasha = true;
+        blog(LOG_INFO,
+             "[Clatasha HUD] Temporarily enabled Windows taskbar auto-hide");
+    } else {
+        g_taskbarAutoHideChangedByClatasha = false;
+        blog(LOG_WARNING,
+             "[Clatasha HUD] Could not enable Windows taskbar auto-hide");
+    }
 }
 
-void keepGameMonitorTaskbarHidden(HWND gameWindow)
+void restoreTemporaryTaskbarAutoHide()
 {
-    if (!gameWindow || !IsWindow(gameWindow))
+    if (!g_taskbarAutoHideChangedByClatasha)
         return;
 
-    const HMONITOR gameMonitor =
-        MonitorFromWindow(gameWindow, MONITOR_DEFAULTTONEAREST);
-    if (!gameMonitor)
+    if (!setTaskbarAutoHideEnabled(false)) {
+        blog(LOG_WARNING,
+             "[Clatasha HUD] Could not restore Windows taskbar auto-hide setting");
         return;
+    }
 
-    EnumWindows(
-        hideTaskbarEnumProc,
-        reinterpret_cast<LPARAM>(gameMonitor));
+    g_taskbarAutoHideChangedByClatasha = false;
+    blog(LOG_INFO,
+         "[Clatasha HUD] Restored Windows taskbar auto-hide setting");
 }
 
 bool setBorderlessWindowGeometry(HWND hwnd)
@@ -909,21 +915,17 @@ bool applyBorderlessStyle(HWND hwnd)
     if (IsIconic(hwnd))
         ShowWindow(hwnd, SW_RESTORE);
 
-    if (!setBorderlessWindowGeometry(hwnd))
-        return false;
-
-    keepGameMonitorTaskbarHidden(hwnd);
-    return true;
+    return setBorderlessWindowGeometry(hwnd);
 }
 
 bool restoreGameBorderlessWindow()
 {
     if (!g_gameBorderless.active) {
-        restoreHiddenGameTaskbars();
+        restoreTemporaryTaskbarAutoHide();
         return true;
     }
 
-    restoreHiddenGameTaskbars();
+    restoreTemporaryTaskbarAutoHide();
 
     HWND hwnd = g_gameBorderless.window;
     const GameBorderlessState original = g_gameBorderless;
@@ -1001,6 +1003,7 @@ bool forceGameBorderless(HWND hwnd)
     state.active = true;
     g_gameBorderless = state;
     g_lastExternalForegroundWindow = hwnd;
+    enableTemporaryTaskbarAutoHide();
 
     blog(LOG_INFO,
          "[Clatasha HUD] Forced borderless fullscreen on %s",
@@ -1020,7 +1023,7 @@ void maintainGameBorderless()
         return;
 
     if (!g_gameBorderless.window || !IsWindow(g_gameBorderless.window)) {
-        restoreHiddenGameTaskbars();
+        restoreTemporaryTaskbarAutoHide();
         g_gameBorderless = {};
         return;
     }
@@ -2876,9 +2879,10 @@ static void show_settings()
             "the game's current monitor while leaving a one-pixel composition "
             "guard. This avoids Windows promoting the game into an exact "
             "fullscreen DirectFlip path. While this mode is active, Clatasha "
-            "temporarily hides the Windows taskbar only on the game's monitor "
-            "and restores it with the original game window. Some elevated or "
-            "protected games may block "
+            "temporarily enables Windows taskbar Auto-hide when needed, so the "
+            "taskbar stays out of the way but still appears when you move the "
+            "pointer to the screen edge. Clatasha restores the setting when "
+            "Borderless is turned off. Some elevated or protected games may block "
             "window-style changes."),
         gameWindowCard);
     gameWindowNote->setWordWrap(true);

@@ -42,6 +42,8 @@ target_sources(
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 
 if(WIN32)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE shell32)
+
   add_executable(clatasha-fps-helper src/fps-helper.cpp)
   target_compile_definitions(clatasha-fps-helper PRIVATE UNICODE _UNICODE NOMINMAX)
   target_link_libraries(clatasha-fps-helper PRIVATE advapi32)
