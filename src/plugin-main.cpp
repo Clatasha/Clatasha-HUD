@@ -349,7 +349,7 @@ public:
         setWindowOpacity(qBound(10, config.opacityPercent, 100) / 100.0);
         positionFromConfig(config);
         show();
-        raise();
+        ensureTopmost();
 
 #ifdef Q_OS_WIN
         const HWND hwnd = reinterpret_cast<HWND>(winId());
@@ -375,6 +375,28 @@ public:
         hide();
         frame_ = QImage();
         update();
+    }
+
+    void ensureTopmost()
+    {
+        if (!active_.load(std::memory_order_acquire) || !isVisible())
+            return;
+
+#ifdef Q_OS_WIN
+        const HWND hwnd = reinterpret_cast<HWND>(winId());
+        if (hwnd) {
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+#else
+        raise();
+#endif
     }
 
 protected:
@@ -1605,6 +1627,13 @@ static void ensure_hud()
     g_hudWatchdog = new QTimer(g_hud);
     g_hudWatchdog->setInterval(1500);
     QObject::connect(g_hudWatchdog, &QTimer::timeout, []() {
+        if (g_browserHudOverlaysWantedVisible) {
+            for (BrowserHudOverlay *overlay : g_hudBrowserOverlays) {
+                if (overlay)
+                    overlay->ensureTopmost();
+            }
+        }
+
         if (!g_hud || !g_hudWantedVisible)
             return;
 
