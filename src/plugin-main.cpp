@@ -101,6 +101,7 @@ struct OverlayConfig {
     // finished source, preventing resize handles from behaving like a crop.
     int sourceWidth = 600;
     int sourceHeight = 300;
+    int opacityPercent = 100;
 
     int hudX = 80;
     int hudY = 80;
@@ -345,6 +346,7 @@ public:
         renderHeight_.store(newHeight, std::memory_order_relaxed);
         active_.store(true, std::memory_order_release);
 
+        setWindowOpacity(qBound(10, config.opacityPercent, 100) / 100.0);
         positionFromConfig(config);
         show();
         raise();
@@ -675,6 +677,10 @@ std::array<OverlayConfig, kOverlayCount> loadOverlayConfigs()
         config.url = settings.value(prefix + QStringLiteral("url")).toString();
         config.mode = static_cast<OverlayMode>(
             qBound(0, settings.value(prefix + QStringLiteral("mode"), 0).toInt(), 2));
+        config.opacityPercent =
+            qBound(10,
+                   settings.value(prefix + QStringLiteral("opacityPercent"), 100).toInt(),
+                   100);
 
         // Migration: older builds used one width/height pair for both the
         // browser viewport and displayed size.
@@ -742,6 +748,7 @@ void saveOverlayConfigs(const std::array<OverlayConfig, kOverlayCount> &configs)
         settings.setValue(prefix + QStringLiteral("name"), config.name);
         settings.setValue(prefix + QStringLiteral("url"), config.url);
         settings.setValue(prefix + QStringLiteral("mode"), static_cast<int>(config.mode));
+        settings.setValue(prefix + QStringLiteral("opacityPercent"), config.opacityPercent);
 
         settings.setValue(prefix + QStringLiteral("sourceWidth"), config.sourceWidth);
         settings.setValue(prefix + QStringLiteral("sourceHeight"), config.sourceHeight);
@@ -782,6 +789,45 @@ bool modeHasVideo(OverlayMode mode)
 bool modeHasHud(OverlayMode mode)
 {
     return mode == OverlayMode::Hud || mode == OverlayMode::Both;
+}
+
+bool applyVideoOpacityFilter(obs_source_t *source, int opacityPercent)
+{
+    if (!source)
+        return false;
+
+    constexpr const char *kOpacityFilterName = "Clatasha Overlay Opacity";
+    const double opacity = qBound(10, opacityPercent, 100) / 100.0;
+
+    obs_data_t *filterSettings = obs_data_create();
+    obs_data_set_double(filterSettings, "opacity", opacity);
+
+    obs_source_t *filter =
+        obs_source_get_filter_by_name(source, kOpacityFilterName);
+
+    if (filter) {
+        obs_source_update(filter, filterSettings);
+        obs_source_release(filter);
+        obs_data_release(filterSettings);
+        return true;
+    }
+
+    filter = obs_source_create(
+        "color_filter",
+        kOpacityFilterName,
+        filterSettings,
+        nullptr);
+    obs_data_release(filterSettings);
+
+    if (!filter) {
+        blog(LOG_WARNING,
+             "[Clatasha HUD] Could not create opacity filter for browser overlay");
+        return false;
+    }
+
+    obs_source_filter_add(source, filter);
+    obs_source_release(filter);
+    return true;
 }
 
 bool applyVideoOverlays(const std::array<OverlayConfig, kOverlayCount> &configs)
@@ -828,6 +874,9 @@ bool applyVideoOverlays(const std::array<OverlayConfig, kOverlayCount> &configs)
         }
 
         obs_data_release(settings);
+
+        if (!applyVideoOpacityFilter(source, config.opacityPercent))
+            browserAvailable = false;
 
         if (scene && !item)
             item = obs_scene_add(scene, source);
@@ -1533,6 +1582,8 @@ struct OverlayRow {
     QLineEdit *url = nullptr;
     QPushButton *browse = nullptr;
     QComboBox *mode = nullptr;
+    QSlider *opacity = nullptr;
+    QLabel *opacityValue = nullptr;
     QLabel *sizeLabel = nullptr;
     QPushButton *preview = nullptr;
 };
@@ -2112,6 +2163,29 @@ static void show_settings()
         sourceRow->addWidget(rows[i].url, 1);
         sourceRow->addWidget(rows[i].browse);
 
+        auto *opacityRow = new QHBoxLayout();
+        opacityRow->setSpacing(8);
+        auto *opacityLabel = new QLabel(QStringLiteral("Opacity"), card);
+        rows[i].opacity = new QSlider(Qt::Horizontal, card);
+        rows[i].opacity->setRange(10, 100);
+        rows[i].opacity->setValue(overlayConfigs[i].opacityPercent);
+        rows[i].opacityValue =
+            new QLabel(QStringLiteral("%1%").arg(overlayConfigs[i].opacityPercent), card);
+        rows[i].opacityValue->setMinimumWidth(38);
+        rows[i].opacityValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        opacityRow->addWidget(opacityLabel);
+        opacityRow->addWidget(rows[i].opacity, 1);
+        opacityRow->addWidget(rows[i].opacityValue);
+
+        QObject::connect(
+            rows[i].opacity,
+            &QSlider::valueChanged,
+            &dialog,
+            [&, i](int value) {
+                rows[i].opacityValue->setText(QStringLiteral("%1%").arg(value));
+            });
+
         auto *bottomRow = new QHBoxLayout();
         rows[i].sizeLabel = new QLabel(overlaySizeText(overlayConfigs[i]), card);
         rows[i].sizeLabel->setProperty("muted", true);
@@ -2123,6 +2197,7 @@ static void show_settings()
 
         cardLayout->addLayout(topRow);
         cardLayout->addLayout(sourceRow);
+        cardLayout->addLayout(opacityRow);
         cardLayout->addLayout(bottomRow);
         cards->addWidget(card);
 
@@ -2156,6 +2231,7 @@ static void show_settings()
             overlayConfigs[i].name = rows[i].name->text().trimmed();
             overlayConfigs[i].url = rows[i].url->text().trimmed();
             overlayConfigs[i].mode = static_cast<OverlayMode>(rows[i].mode->currentData().toInt());
+            overlayConfigs[i].opacityPercent = rows[i].opacity->value();
 
             showOverlayPreview(&dialog, i, overlayConfigs[i]);
 
@@ -2169,7 +2245,7 @@ static void show_settings()
     browserLayout->addWidget(scroll, 1);
 
     auto *videoNote = new QLabel(
-        QStringLiteral("HUD overlays preserve transparency and stay invisible until content is rendered. Direct image URLs and local image files are wrapped on a transparent canvas automatically. Local HTML files use OBS Browser Source local-file mode. VIDEO overlays are added to the current OBS scene when you press Apply or OK."),
+        QStringLiteral("HUD overlays preserve transparency and stay invisible until content is rendered. Direct image URLs and local image files are wrapped on a transparent canvas automatically. Local HTML files use OBS Browser Source local-file mode. The Opacity slider applies to whichever output mode is selected: HUD, VIDEO, or both. VIDEO overlays are added to the current OBS scene when you press Apply or OK."),
         browserTab);
     videoNote->setWordWrap(true);
     videoNote->setProperty("accentNote", true);
@@ -2642,6 +2718,7 @@ static void show_settings()
                 overlayConfigs[i].name = QStringLiteral("Overlay %1").arg(i + 1);
             overlayConfigs[i].url = rows[i].url->text().trimmed();
             overlayConfigs[i].mode = static_cast<OverlayMode>(rows[i].mode->currentData().toInt());
+            overlayConfigs[i].opacityPercent = rows[i].opacity->value();
         }
     };
 
