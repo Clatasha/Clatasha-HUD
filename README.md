@@ -65,6 +65,18 @@ Local files can be selected with **Browse Local…**. Local transparent images u
 
 HUD browser overlays render through an off-screen OBS `browser_source` so transparent alert widgets stay invisible until they actually draw content.
 
+### Game display mode compatibility
+
+Clatasha HUD uses normal Windows desktop overlay windows for its private HUD and HUD browser overlays.
+
+- **Windowed games** — supported.
+- **Borderless / borderless fullscreen games** — supported and recommended for the most reliable HUD overlay behavior.
+- **True exclusive fullscreen games** — may appear above normal desktop windows and prevent Clatasha HUD overlays from being visible.
+
+Clatasha HUD periodically reasserts its HUD windows as topmost to recover their position when a game launches or changes focus. If a game still covers the HUD while running in exclusive fullscreen, switch that game to **Borderless** or **Borderless Fullscreen** mode.
+
+This limitation applies to the private desktop HUD overlays. It does not prevent `VIDEO` overlays from being rendered as normal OBS scene sources.
+
 ## Game FPS backend
 
 Game/application FPS is collected by `clatasha-fps-helper.exe` using the Windows DXGI ETW provider. The helper is launched elevated because starting the ETW session normally requires suitable Windows tracing permissions.
