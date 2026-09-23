@@ -116,6 +116,21 @@ struct OverlayConfig {
     bool videoLockRatio = true;
 };
 
+#ifdef Q_OS_WIN
+struct GameBorderlessState {
+    HWND window = nullptr;
+    LONG_PTR style = 0;
+    LONG_PTR exStyle = 0;
+    RECT rect{};
+    WINDOWPLACEMENT placement{sizeof(WINDOWPLACEMENT)};
+    bool active = false;
+};
+
+GameBorderlessState g_gameBorderless;
+HWND g_lastExternalForegroundWindow = nullptr;
+bool g_keepGameBorderlessApplied = true;
+#endif
+
 QString localFilePathFromValue(const QString &value)
 {
     const QString trimmed = value.trimmed();
@@ -674,6 +689,277 @@ QString settingsFilePath()
     bfree(path);
     return result;
 }
+
+#ifdef Q_OS_WIN
+bool isExternalForegroundCandidate(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd))
+        return false;
+
+    hwnd = GetAncestor(hwnd, GA_ROOT);
+    if (!hwnd || !IsWindow(hwnd))
+        return false;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    return pid != 0 && pid != GetCurrentProcessId();
+}
+
+void trackExternalForegroundWindow()
+{
+    HWND hwnd = GetForegroundWindow();
+    if (!isExternalForegroundCandidate(hwnd))
+        return;
+
+    g_lastExternalForegroundWindow = GetAncestor(hwnd, GA_ROOT);
+}
+
+QString externalWindowDescription(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+        return QStringLiteral("No game/window detected");
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+
+    QString processName;
+    HANDLE process =
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (process) {
+        wchar_t path[MAX_PATH] = {};
+        DWORD size = MAX_PATH;
+        if (QueryFullProcessImageNameW(process, 0, path, &size))
+            processName = QFileInfo(QString::fromWCharArray(path)).fileName();
+        CloseHandle(process);
+    }
+
+    wchar_t title[512] = {};
+    GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
+    const QString windowTitle = QString::fromWCharArray(title).trimmed();
+
+    if (processName.isEmpty())
+        processName = QStringLiteral("PID %1").arg(pid);
+
+    if (windowTitle.isEmpty())
+        return processName;
+
+    return QStringLiteral("%1 — %2").arg(processName, windowTitle);
+}
+
+void loadGameWindowSettings()
+{
+    const QString path = settingsFilePath();
+    if (path.isEmpty())
+        return;
+
+    QSettings settings(path, QSettings::IniFormat);
+    g_keepGameBorderlessApplied =
+        settings.value(
+                    QStringLiteral("gameWindow/keepBorderlessApplied"),
+                    true)
+            .toBool();
+}
+
+void saveGameWindowSettings()
+{
+    const QString path = settingsFilePath();
+    if (path.isEmpty())
+        return;
+
+    QSettings settings(path, QSettings::IniFormat);
+    settings.setValue(
+        QStringLiteral("gameWindow/keepBorderlessApplied"),
+        g_keepGameBorderlessApplied);
+    settings.sync();
+}
+
+bool setBorderlessWindowGeometry(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+        return false;
+
+    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if (!monitor)
+        return false;
+
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo))
+        return false;
+
+    const RECT &area = monitorInfo.rcMonitor;
+    const int width = area.right - area.left;
+    const int height = area.bottom - area.top;
+
+    return SetWindowPos(
+               hwnd,
+               HWND_NOTOPMOST,
+               area.left,
+               area.top,
+               width,
+               height,
+               SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOOWNERZORDER |
+                   SWP_SHOWWINDOW) != FALSE;
+}
+
+bool applyBorderlessStyle(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+        return false;
+
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+
+    style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
+               WS_MAXIMIZEBOX | WS_SYSMENU | WS_BORDER | WS_DLGFRAME);
+    style |= WS_POPUP;
+
+    exStyle &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE |
+                 WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_TOPMOST);
+
+    SetLastError(ERROR_SUCCESS);
+    const LONG_PTR oldStyle = SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+    if (oldStyle == 0 && GetLastError() != ERROR_SUCCESS)
+        return false;
+
+    SetLastError(ERROR_SUCCESS);
+    const LONG_PTR oldExStyle =
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exStyle);
+    if (oldExStyle == 0 && GetLastError() != ERROR_SUCCESS)
+        return false;
+
+    if (IsIconic(hwnd))
+        ShowWindow(hwnd, SW_RESTORE);
+
+    return setBorderlessWindowGeometry(hwnd);
+}
+
+bool restoreGameBorderlessWindow()
+{
+    if (!g_gameBorderless.active)
+        return true;
+
+    HWND hwnd = g_gameBorderless.window;
+    const GameBorderlessState original = g_gameBorderless;
+    g_gameBorderless = {};
+
+    if (!hwnd || !IsWindow(hwnd))
+        return true;
+
+    SetWindowLongPtrW(hwnd, GWL_STYLE, original.style);
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, original.exStyle);
+
+    const int width = original.rect.right - original.rect.left;
+    const int height = original.rect.bottom - original.rect.top;
+    const HWND zOrder =
+        (original.exStyle & WS_EX_TOPMOST) ? HWND_TOPMOST : HWND_NOTOPMOST;
+
+    SetWindowPos(
+        hwnd,
+        zOrder,
+        original.rect.left,
+        original.rect.top,
+        width,
+        height,
+        SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOOWNERZORDER |
+            SWP_SHOWWINDOW);
+
+    WINDOWPLACEMENT placement = original.placement;
+    placement.length = sizeof(WINDOWPLACEMENT);
+    SetWindowPlacement(hwnd, &placement);
+
+    blog(LOG_INFO, "[Clatasha HUD] Restored original game window");
+    return true;
+}
+
+bool forceGameBorderless(HWND hwnd)
+{
+    if (!isExternalForegroundCandidate(hwnd))
+        return false;
+
+    hwnd = GetAncestor(hwnd, GA_ROOT);
+
+    if (g_gameBorderless.active && g_gameBorderless.window == hwnd)
+        return applyBorderlessStyle(hwnd);
+
+    if (g_gameBorderless.active)
+        restoreGameBorderlessWindow();
+
+    GameBorderlessState state;
+    state.window = hwnd;
+    state.style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    state.exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    state.placement.length = sizeof(WINDOWPLACEMENT);
+
+    if (!GetWindowRect(hwnd, &state.rect) ||
+        !GetWindowPlacement(hwnd, &state.placement)) {
+        return false;
+    }
+
+    if (!applyBorderlessStyle(hwnd)) {
+        // Best effort rollback if Windows rejected only part of the change.
+        SetWindowLongPtrW(hwnd, GWL_STYLE, state.style);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, state.exStyle);
+        SetWindowPos(
+            hwnd,
+            (state.exStyle & WS_EX_TOPMOST) ? HWND_TOPMOST : HWND_NOTOPMOST,
+            state.rect.left,
+            state.rect.top,
+            state.rect.right - state.rect.left,
+            state.rect.bottom - state.rect.top,
+            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOOWNERZORDER |
+                SWP_SHOWWINDOW);
+        return false;
+    }
+
+    state.active = true;
+    g_gameBorderless = state;
+    g_lastExternalForegroundWindow = hwnd;
+
+    blog(LOG_INFO,
+         "[Clatasha HUD] Forced borderless fullscreen on %s",
+         externalWindowDescription(hwnd).toUtf8().constData());
+    return true;
+}
+
+bool forceLastExternalGameBorderless()
+{
+    trackExternalForegroundWindow();
+    return forceGameBorderless(g_lastExternalForegroundWindow);
+}
+
+void maintainGameBorderless()
+{
+    if (!g_keepGameBorderlessApplied || !g_gameBorderless.active)
+        return;
+
+    if (!g_gameBorderless.window || !IsWindow(g_gameBorderless.window)) {
+        g_gameBorderless = {};
+        return;
+    }
+
+    applyBorderlessStyle(g_gameBorderless.window);
+}
+
+void toggleGameBorderless()
+{
+    if (g_gameBorderless.active) {
+        restoreGameBorderlessWindow();
+        return;
+    }
+
+    if (!forceLastExternalGameBorderless()) {
+        blog(LOG_WARNING,
+             "[Clatasha HUD] No external foreground game/window available for borderless mode");
+    }
+}
+#else
+void loadGameWindowSettings() {}
+void saveGameWindowSettings() {}
+void trackExternalForegroundWindow() {}
+void maintainGameBorderless() {}
+void toggleGameBorderless() {}
+#endif
 
 QString overlaySourceName(int index)
 {
@@ -1627,6 +1913,9 @@ static void ensure_hud()
     g_hudWatchdog = new QTimer(g_hud);
     g_hudWatchdog->setInterval(250);
     QObject::connect(g_hudWatchdog, &QTimer::timeout, []() {
+        trackExternalForegroundWindow();
+        maintainGameBorderless();
+
         if (g_browserHudOverlaysWantedVisible) {
             for (BrowserHudOverlay *overlay : g_hudBrowserOverlays) {
                 if (overlay)
@@ -1714,6 +2003,7 @@ enum class HudHotkeyAction : int {
     ToggleRecording,
     PauseRecording,
     ToggleStreaming,
+    ToggleGameBorderless,
     Count,
 };
 
@@ -1735,6 +2025,7 @@ static std::array<HudHotkeyDefinition, kHudHotkeyCount> g_hudHotkeys{{
     {"ClatashaHUD.ToggleRecording", "Clatasha HUD: Toggle Recording", "Toggle Recording", "Recording"},
     {"ClatashaHUD.PauseRecording", "Clatasha HUD: Pause/Resume Recording", "Pause/Resume Recording", "Recording"},
     {"ClatashaHUD.ToggleStreaming", "Clatasha HUD: Toggle Streaming", "Toggle Streaming", "Streaming"},
+    {"ClatashaHUD.ToggleGameBorderless", "Clatasha HUD: Toggle Game Borderless Fullscreen", "Toggle Game Borderless Fullscreen", "Game Window"},
 }};
 
 static QString hotkeyCombinationText(obs_key_combination_t combination)
@@ -1947,6 +2238,10 @@ static void runHotkeyActionOnUi(HudHotkeyAction action)
                     obs_frontend_streaming_stop();
                 else
                     obs_frontend_streaming_start();
+                break;
+
+            case HudHotkeyAction::ToggleGameBorderless:
+                toggleGameBorderless();
                 break;
 
             case HudHotkeyAction::Count:
@@ -2432,13 +2727,141 @@ static void show_settings()
     hotkeysCardsLayout->addWidget(hotkeyNote);
     hotkeysCardsLayout->addStretch();
 
-    auto *advancedPage = makeInfoPage(
-        QStringLiteral("Advanced"),
-        QStringLiteral("Rendering and compatibility information."),
+    auto *advancedPage = new QWidget(pages);
+    auto *advancedLayout = new QVBoxLayout(advancedPage);
+    advancedLayout->setContentsMargins(18, 18, 18, 18);
+    advancedLayout->setSpacing(12);
+
+    auto *advancedTitle =
+        new QLabel(QStringLiteral("Advanced"), advancedPage);
+    QFont advancedTitleFont = advancedTitle->font();
+    advancedTitleFont.setPointSize(15);
+    advancedTitleFont.setBold(true);
+    advancedTitle->setFont(advancedTitleFont);
+
+    auto *advancedSubtitle = new QLabel(
         QStringLiteral(
-            "Browser overlays use OBS Browser Source. HUD browser content is rendered "
-            "off-screen with alpha and composited into the private desktop overlay. "
-            "Game FPS uses the Clatasha DXGI ETW helper."));
+            "Game-window compatibility and lower-level Clatasha HUD controls."),
+        advancedPage);
+    advancedSubtitle->setWordWrap(true);
+    advancedSubtitle->setProperty("muted", true);
+
+    auto *gameWindowCard =
+        new QGroupBox(QStringLiteral("Game Window"), advancedPage);
+    auto *gameWindowLayout = new QVBoxLayout(gameWindowCard);
+    gameWindowLayout->setContentsMargins(14, 20, 14, 14);
+    gameWindowLayout->setSpacing(10);
+
+    auto *gameTargetLabel =
+        new QLabel(QStringLiteral("Target: checking…"), gameWindowCard);
+    gameTargetLabel->setWordWrap(true);
+
+    auto *gameWindowStatus =
+        new QLabel(QStringLiteral("Status: Original window mode"), gameWindowCard);
+    gameWindowStatus->setProperty("muted", true);
+
+    auto *keepBorderless = new QCheckBox(
+        QStringLiteral("Keep Borderless Applied"),
+        gameWindowCard);
+#ifdef Q_OS_WIN
+    keepBorderless->setChecked(g_keepGameBorderlessApplied);
+#else
+    keepBorderless->setChecked(false);
+    keepBorderless->setEnabled(false);
+#endif
+
+    auto *gameButtons = new QHBoxLayout();
+    auto *forceBorderlessButton = new QPushButton(
+        QStringLiteral("Force Borderless Fullscreen"),
+        gameWindowCard);
+    auto *restoreWindowButton = new QPushButton(
+        QStringLiteral("Restore Original Window"),
+        gameWindowCard);
+    gameButtons->addWidget(forceBorderlessButton);
+    gameButtons->addWidget(restoreWindowButton);
+    gameButtons->addStretch();
+
+    auto *gameWindowNote = new QLabel(
+        QStringLiteral(
+            "Clatasha remembers the last non-OBS foreground window. If the target "
+            "is wrong, Alt-Tab to the game once, then return here. Borderless "
+            "Fullscreen removes the title bar and window buttons, fills the "
+            "game's current monitor, and keeps the game in normal Windows "
+            "desktop composition so private HUD overlays have a better chance "
+            "to remain visible. Some elevated or protected games may block "
+            "window-style changes."),
+        gameWindowCard);
+    gameWindowNote->setWordWrap(true);
+    gameWindowNote->setProperty("accentNote", true);
+
+    gameWindowLayout->addWidget(gameTargetLabel);
+    gameWindowLayout->addWidget(gameWindowStatus);
+    gameWindowLayout->addWidget(keepBorderless);
+    gameWindowLayout->addLayout(gameButtons);
+    gameWindowLayout->addWidget(gameWindowNote);
+
+    advancedLayout->addWidget(advancedTitle);
+    advancedLayout->addWidget(advancedSubtitle);
+    advancedLayout->addWidget(gameWindowCard);
+    advancedLayout->addStretch();
+
+#ifdef Q_OS_WIN
+    auto refreshGameWindowUi = [=]() {
+        HWND target = g_gameBorderless.active
+                          ? g_gameBorderless.window
+                          : g_lastExternalForegroundWindow;
+        gameTargetLabel->setText(
+            QStringLiteral("Target: %1")
+                .arg(externalWindowDescription(target)));
+        gameWindowStatus->setText(
+            g_gameBorderless.active
+                ? QStringLiteral("Status: Borderless Fullscreen active")
+                : QStringLiteral("Status: Original window mode"));
+        restoreWindowButton->setEnabled(g_gameBorderless.active);
+    };
+
+    auto *gameUiTimer = new QTimer(advancedPage);
+    gameUiTimer->setInterval(500);
+    QObject::connect(
+        gameUiTimer,
+        &QTimer::timeout,
+        advancedPage,
+        refreshGameWindowUi);
+    gameUiTimer->start();
+    refreshGameWindowUi();
+
+    QObject::connect(
+        forceBorderlessButton,
+        &QPushButton::clicked,
+        &dialog,
+        [&, refreshGameWindowUi]() {
+            if (!forceLastExternalGameBorderless()) {
+                QMessageBox::warning(
+                    &dialog,
+                    QStringLiteral("Game Window"),
+                    QStringLiteral(
+                        "Clatasha could not modify the target window. Alt-Tab "
+                        "to the game once and try again. Elevated or protected "
+                        "games can block window-style changes."));
+            }
+            refreshGameWindowUi();
+        });
+
+    QObject::connect(
+        restoreWindowButton,
+        &QPushButton::clicked,
+        &dialog,
+        [refreshGameWindowUi]() {
+            restoreGameBorderlessWindow();
+            refreshGameWindowUi();
+        });
+#else
+    forceBorderlessButton->setEnabled(false);
+    restoreWindowButton->setEnabled(false);
+    gameTargetLabel->setText(QStringLiteral("Target: Windows only"));
+    gameWindowStatus->setText(
+        QStringLiteral("Status: Game Window controls require Windows"));
+#endif
 
     auto *aboutPage = makeInfoPage(
         QStringLiteral("About"),
@@ -2792,6 +3215,10 @@ static void show_settings()
         saveHudHotkeys();
         g_hud->saveSettings();
         saveOverlayConfigs(overlayConfigs);
+#ifdef Q_OS_WIN
+        g_keepGameBorderlessApplied = keepBorderless->isChecked();
+        saveGameWindowSettings();
+#endif
 
         const bool videoOk = applyVideoOverlays(overlayConfigs);
         const bool hudOk = applyHudOverlays(overlayConfigs);
@@ -2917,6 +3344,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
         break;
 
     case OBS_FRONTEND_EVENT_EXIT:
+        restoreGameBorderlessWindow();
         g_frontendExiting = true;
         g_hudWantedVisible = false;
         destroyHudOverlays();
@@ -2938,6 +3366,7 @@ bool obs_module_load(void)
     blog(LOG_INFO, "[Clatasha HUD] Loading plugin");
 
     g_frontendExiting = false;
+    loadGameWindowSettings();
     obs_frontend_add_event_callback(on_frontend_event, nullptr);
     registerHudHotkeys();
 
@@ -2956,6 +3385,7 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+    restoreGameBorderlessWindow();
     g_hudWantedVisible = false;
     unregisterHudHotkeys();
     if (!g_frontendExiting)
