@@ -296,6 +296,7 @@ void ClatashaHudWindow::startFpsHelper()
 
     fpsHelperHandle_ = reinterpret_cast<quintptr>(info.hProcess);
     fpsHelperStarted_ = true;
+    lastFpsStateMtimeMs_ = 0;
     blog(LOG_INFO, "[Clatasha HUD] Direct ETW FPS helper started");
 #endif
 }
@@ -617,9 +618,43 @@ void ClatashaHudWindow::refresh()
         fpsDiagnosticTicks = 0;
         bool helperAlive = false;
 #ifdef Q_OS_WIN
-        if (fpsHelperHandle_ != 0)
-            helperAlive =
-                WaitForSingleObject(reinterpret_cast<HANDLE>(fpsHelperHandle_), 0) == WAIT_TIMEOUT;
+        if (fpsHelperHandle_ != 0) {
+            HANDLE process = reinterpret_cast<HANDLE>(fpsHelperHandle_);
+            const DWORD waitResult = WaitForSingleObject(process, 0);
+            helperAlive = waitResult == WAIT_TIMEOUT;
+
+            if (!helperAlive) {
+                DWORD exitCode = 0;
+                GetExitCodeProcess(process, &exitCode);
+                CloseHandle(process);
+                fpsHelperHandle_ = 0;
+                fpsHelperStarted_ = false;
+                fpsHelperStableChecks_ = 0;
+                resetGameFps();
+
+                blog(LOG_WARNING,
+                     "[Clatasha HUD] FPS helper stopped unexpectedly (exit code %lu)",
+                     exitCode);
+
+                // A successful ShellExecute only means Windows launched the
+                // helper. ETW initialization can still fail immediately
+                // afterward. Retry once rather than leaving the HUD stuck at
+                // "--" for the rest of the OBS session.
+                if (fpsHelperRestartAttempts_ < 1) {
+                    ++fpsHelperRestartAttempts_;
+                    blog(LOG_INFO,
+                         "[Clatasha HUD] Retrying FPS helper after early exit");
+                    startFpsHelper();
+                }
+            } else {
+                if (++fpsHelperStableChecks_ >= 6) {
+                    // After roughly 30 seconds of stable operation, allow one
+                    // future recovery attempt if the helper later terminates.
+                    fpsHelperStableChecks_ = 6;
+                    fpsHelperRestartAttempts_ = 0;
+                }
+            }
+        }
 #endif
         blog(LOG_INFO,
              "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s",

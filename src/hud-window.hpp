@@ -63,6 +63,8 @@ private:
     QElapsedTimer gameFpsClock_;
     quintptr fpsHelperHandle_ = 0;
     bool fpsHelperStarted_ = false;
+    int fpsHelperRestartAttempts_ = 0;
+    int fpsHelperStableChecks_ = 0;
     qint64 lastFpsStateMtimeMs_ = 0;
     qint64 lastValidGameFpsMs_ = -1;
 
