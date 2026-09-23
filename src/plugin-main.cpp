@@ -56,6 +56,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -129,6 +130,7 @@ struct GameBorderlessState {
 GameBorderlessState g_gameBorderless;
 HWND g_lastExternalForegroundWindow = nullptr;
 bool g_keepGameBorderlessApplied = true;
+std::vector<HWND> g_hiddenGameTaskbars;
 #endif
 
 QString localFilePathFromValue(const QString &value)
@@ -773,6 +775,69 @@ void saveGameWindowSettings()
     settings.sync();
 }
 
+bool isWindowsTaskbarWindow(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd))
+        return false;
+
+    wchar_t className[128] = {};
+    if (!GetClassNameW(hwnd, className, static_cast<int>(std::size(className))))
+        return false;
+
+    return wcscmp(className, L"Shell_TrayWnd") == 0 ||
+           wcscmp(className, L"Shell_SecondaryTrayWnd") == 0;
+}
+
+void restoreHiddenGameTaskbars()
+{
+    for (HWND taskbar : g_hiddenGameTaskbars) {
+        if (taskbar && IsWindow(taskbar))
+            ShowWindow(taskbar, SW_SHOWNOACTIVATE);
+    }
+    g_hiddenGameTaskbars.clear();
+}
+
+BOOL CALLBACK hideTaskbarEnumProc(HWND hwnd, LPARAM param)
+{
+    if (!isWindowsTaskbarWindow(hwnd))
+        return TRUE;
+
+    const HMONITOR targetMonitor =
+        reinterpret_cast<HMONITOR>(param);
+    const HMONITOR taskbarMonitor =
+        MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+
+    if (taskbarMonitor != targetMonitor)
+        return TRUE;
+
+    if (IsWindowVisible(hwnd)) {
+        if (std::find(
+                g_hiddenGameTaskbars.begin(),
+                g_hiddenGameTaskbars.end(),
+                hwnd) == g_hiddenGameTaskbars.end()) {
+            g_hiddenGameTaskbars.push_back(hwnd);
+        }
+        ShowWindow(hwnd, SW_HIDE);
+    }
+
+    return TRUE;
+}
+
+void keepGameMonitorTaskbarHidden(HWND gameWindow)
+{
+    if (!gameWindow || !IsWindow(gameWindow))
+        return;
+
+    const HMONITOR gameMonitor =
+        MonitorFromWindow(gameWindow, MONITOR_DEFAULTTONEAREST);
+    if (!gameMonitor)
+        return;
+
+    EnumWindows(
+        hideTaskbarEnumProc,
+        reinterpret_cast<LPARAM>(gameMonitor));
+}
+
 bool setBorderlessWindowGeometry(HWND hwnd)
 {
     if (!hwnd || !IsWindow(hwnd))
@@ -801,12 +866,12 @@ bool setBorderlessWindowGeometry(HWND hwnd)
     constexpr int kCompositionGuardPx = 1;
     const int compositedHeight = qMax(1, height - kCompositionGuardPx);
 
-    // Keep the game in the topmost band so it covers the Windows
-    // taskbar. The Clatasha HUD watchdog runs after this and reasserts the
-    // private HUD windows as topmost again, leaving the HUD above the game.
+    // The taskbar is handled explicitly while forced-borderless mode is
+    // active. Keep the game itself out of the topmost band so Clatasha's HUD
+    // remains the only overlay that needs topmost recovery.
     return SetWindowPos(
                hwnd,
-               HWND_TOPMOST,
+               HWND_NOTOPMOST,
                area.left,
                area.top,
                width,
@@ -844,13 +909,21 @@ bool applyBorderlessStyle(HWND hwnd)
     if (IsIconic(hwnd))
         ShowWindow(hwnd, SW_RESTORE);
 
-    return setBorderlessWindowGeometry(hwnd);
+    if (!setBorderlessWindowGeometry(hwnd))
+        return false;
+
+    keepGameMonitorTaskbarHidden(hwnd);
+    return true;
 }
 
 bool restoreGameBorderlessWindow()
 {
-    if (!g_gameBorderless.active)
+    if (!g_gameBorderless.active) {
+        restoreHiddenGameTaskbars();
         return true;
+    }
+
+    restoreHiddenGameTaskbars();
 
     HWND hwnd = g_gameBorderless.window;
     const GameBorderlessState original = g_gameBorderless;
@@ -947,6 +1020,7 @@ void maintainGameBorderless()
         return;
 
     if (!g_gameBorderless.window || !IsWindow(g_gameBorderless.window)) {
+        restoreHiddenGameTaskbars();
         g_gameBorderless = {};
         return;
     }
@@ -2801,9 +2875,10 @@ static void show_settings()
             "Fullscreen removes the title bar and window buttons and fills "
             "the game's current monitor while leaving a one-pixel composition "
             "guard. This avoids Windows promoting the game into an exact "
-            "fullscreen DirectFlip path. The game is kept above the Windows "
-            "taskbar while Clatasha reasserts its private HUD above the game. "
-            "Some elevated or protected games may block "
+            "fullscreen DirectFlip path. While this mode is active, Clatasha "
+            "temporarily hides the Windows taskbar only on the game's monitor "
+            "and restores it with the original game window. Some elevated or "
+            "protected games may block "
             "window-style changes."),
         gameWindowCard);
     gameWindowNote->setWordWrap(true);
