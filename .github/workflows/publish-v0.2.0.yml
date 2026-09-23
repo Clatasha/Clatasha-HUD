@@ -1,0 +1,110 @@
+name: Publish Clatasha HUD v0.2.0
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-v0.2.0.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout v0.2.0 source
+        uses: actions/checkout@v4
+        with:
+          ref: e2dd4a32bb3b1af8ad2ad7c1ed1f377fbedfd614
+
+      - name: Configure
+        run: cmake --preset windows-x64
+
+      - name: Build
+        run: cmake --build --preset windows-x64
+
+      - name: Install staging files
+        run: cmake --install build_x64 --config RelWithDebInfo --prefix package
+
+      - name: Create OBS installation package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $pluginRoot = "package/clatasha-hud"
+          $dist = "dist"
+
+          New-Item -ItemType Directory -Force "$dist/obs-plugins/64bit" | Out-Null
+          New-Item -ItemType Directory -Force "$dist/data/obs-plugins/clatasha-hud/locale" | Out-Null
+
+          Copy-Item "$pluginRoot/bin/64bit/clatasha-hud.dll" "$dist/obs-plugins/64bit/clatasha-hud.dll"
+          Copy-Item "$pluginRoot/data/clatasha-fps-helper.exe" "$dist/data/obs-plugins/clatasha-hud/clatasha-fps-helper.exe"
+          Copy-Item "$pluginRoot/data/locale/en-US.ini" "$dist/data/obs-plugins/clatasha-hud/locale/en-US.ini"
+
+          Compress-Archive -Path "$dist/*" -DestinationPath "Clatasha-HUD-OBS-0.2.0-Windows-x64.zip" -Force
+
+      - name: Write release notes
+        shell: pwsh
+        run: |
+          @'
+          ## Clatasha HUD 0.2.0
+
+          This release expands Clatasha HUD's game compatibility, browser overlay controls, and Windows game-window tools.
+
+          ### New in 0.2.0
+          - Broader game FPS capture using Clatasha's own lightweight ETW helper with DXGI, DXGI multiplane, D3D9, and DXGKRNL presentation coverage.
+          - Automatic FPS-helper recovery if the ETW helper exits unexpectedly.
+          - Per-overlay opacity control for HUD, VIDEO, or HUD / VIDEO output modes.
+          - Stronger browser HUD topmost recovery when games launch or take focus.
+          - Force Borderless Fullscreen for games that only provide Windowed and Fullscreen modes.
+          - One-pixel composition guard to reduce Windows promoting forced-borderless games into fullscreen-style DirectFlip presentation.
+          - Temporary Windows taskbar Auto-hide while forced-borderless mode is active, with automatic restoration afterward.
+          - Restore Original Window support for game position, size, style, and placement.
+          - Keep Borderless Applied option for games that try to restore their own window frame.
+          - New Toggle Game Borderless Fullscreen hotkey.
+
+          ### Existing features
+          - Compact 145 × 50 click-through private status HUD.
+          - Game/application FPS and OBS renderer FPS.
+          - Desktop Audio and Mic/Aux meters.
+          - Recording/streaming timer and recording-drive free-space display.
+          - Replay Buffer shimmer indicator.
+          - Five browser overlay slots with HUD, VIDEO, or HUD / VIDEO modes.
+          - Browser overlay preview/editor with independent HUD and VIDEO placement.
+          - Transparent image, browser-widget, and local HTML support.
+          - Editable OBS frontend hotkeys.
+          - Resizable Clatasha HUD settings interface.
+
+          ### Borderless Fullscreen notes
+          Forced Borderless Fullscreen is intended for games that do not provide their own borderless mode. Clatasha removes the window frame and fills the display while retaining a tiny composition guard so private desktop HUD overlays can remain visible. Windows taskbar Auto-hide is temporarily enabled when necessary and restored when Borderless mode ends.
+
+          Some protected or elevated games may prevent external window-style changes.
+
+          ### Requirements
+          - Windows 10 or Windows 11 x64
+          - OBS Studio with Browser Source/obs-browser installed and enabled
+          - Current development/testing is on OBS Studio 32.2.2
+
+          ### Installation
+          1. Close OBS Studio.
+          2. Extract **Clatasha-HUD-OBS-0.2.0-Windows-x64.zip** directly into the OBS installation directory, normally `C:\Program Files\obs-studio`.
+          3. Restart OBS Studio.
+          4. Open Clatasha HUD from the **Tools** menu.
+
+          The ZIP already uses the OBS installation-root folder structure.
+          '@ | Set-Content -Path "release-notes.md" -Encoding UTF8
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v0.2.0" "Clatasha-HUD-OBS-0.2.0-Windows-x64.zip#Windows x64 OBS installation package" `
+            --repo "${{ github.repository }}" `
+            --target "e2dd4a32bb3b1af8ad2ad7c1ed1f377fbedfd614" `
+            --title "Clatasha HUD - OBS Status Overlay 0.2.0" `
+            --notes-file "release-notes.md"
