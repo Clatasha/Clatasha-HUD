@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Checkout v0.2.0 source
         uses: actions/checkout@v4
