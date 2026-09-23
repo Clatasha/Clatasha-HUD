@@ -392,7 +392,7 @@ public:
                 0,
                 0,
                 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
         }
 #else
         raise();
@@ -1625,7 +1625,7 @@ static void ensure_hud()
     g_hud = new ClatashaHudWindow();
 
     g_hudWatchdog = new QTimer(g_hud);
-    g_hudWatchdog->setInterval(1500);
+    g_hudWatchdog->setInterval(250);
     QObject::connect(g_hudWatchdog, &QTimer::timeout, []() {
         if (g_browserHudOverlaysWantedVisible) {
             for (BrowserHudOverlay *overlay : g_hudBrowserOverlays) {
@@ -1659,7 +1659,7 @@ static void ensure_hud()
                 0,
                 0,
                 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
         }
 #else
         if (restored)
@@ -1701,7 +1701,7 @@ static void toggle_hud()
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
     }
 #endif
 }

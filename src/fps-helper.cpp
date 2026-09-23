@@ -7,6 +7,7 @@
 #include <evntcons.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -22,17 +23,37 @@ namespace {
 
 constexpr ULONG kRealTimeMode = EVENT_TRACE_REAL_TIME_MODE;
 constexpr ULONG kProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
-constexpr ULONGLONG kDxgiKeyword = 0x2ULL;
+constexpr ULONGLONG kRuntimePresentKeyword = 0x2ULL;
+constexpr ULONGLONG kDxgKrnlPresentKeyword = 0x08000001ULL;
 constexpr UCHAR kTraceLevel = 5;
-constexpr USHORT kPresentStartEventId = 42;
+constexpr USHORT kDxgiPresentStartEventId = 0x002a;
+constexpr USHORT kDxgiMpoPresentStartEventId = 0x0037;
+constexpr USHORT kD3d9PresentStartEventId = 0x0001;
+constexpr USHORT kDxgKrnlPresentHistoryStartEventId = 0x00ab;
+constexpr USHORT kDxgKrnlPresentHistoryDetailedStartEventId = 0x00d7;
 constexpr DWORD kSampleMs = 250;
 constexpr double kWindowMs = 1000.0;
 
 const GUID kDxgiProvider =
     {0xCA11C036, 0x0102, 0x4A2D, {0xA6, 0xAD, 0xF0, 0x3C, 0xFE, 0xD5, 0xD3, 0xC9}};
+const GUID kD3d9Provider =
+    {0x783ACA0A, 0x790E, 0x4D7F, {0x84, 0x51, 0xAA, 0x85, 0x05, 0x11, 0xC6, 0xB9}};
+const GUID kDxgKrnlProvider =
+    {0x802EC45A, 0x1E99, 0x4B83, {0x99, 0x20, 0x87, 0xC9, 0x82, 0x77, 0xBA, 0x9D}};
+
+enum class PresentStream : size_t {
+    Dxgi = 0,
+    D3d9,
+    DxgKrnlHistory,
+    DxgKrnlDetailed,
+    Count,
+};
+
+constexpr size_t kPresentStreamCount =
+    static_cast<size_t>(PresentStream::Count);
 
 std::mutex gMutex;
-std::map<DWORD, std::uint64_t> gCounts;
+std::map<DWORD, std::array<std::uint64_t, kPresentStreamCount>> gCounts;
 std::atomic<bool> gStopping{false};
 TRACEHANDLE gSession = 0;
 TRACEHANDLE gTrace = INVALID_PROCESSTRACE_HANDLE;
@@ -41,7 +62,17 @@ struct RateState {
     std::deque<std::pair<ULONGLONG, std::uint64_t>> samples;
 };
 
-std::map<DWORD, RateState> gRates;
+using RateStreams = std::array<RateState, kPresentStreamCount>;
+std::map<DWORD, RateStreams> gRates;
+
+void CountPresent(DWORD pid, PresentStream stream)
+{
+    if (pid == 0)
+        return;
+
+    std::scoped_lock lock(gMutex);
+    ++gCounts[pid][static_cast<size_t>(stream)];
+}
 
 void WINAPI OnEvent(PEVENT_RECORD record)
 {
@@ -49,17 +80,29 @@ void WINAPI OnEvent(PEVENT_RECORD record)
         return;
 
     const auto &header = record->EventHeader;
-    if (!IsEqualGUID(header.ProviderId, kDxgiProvider))
-        return;
+    const USHORT eventId = header.EventDescriptor.Id;
 
-    if (header.EventDescriptor.Id != kPresentStartEventId)
+    if (IsEqualGUID(header.ProviderId, kDxgiProvider)) {
+        if (eventId == kDxgiPresentStartEventId ||
+            eventId == kDxgiMpoPresentStartEventId) {
+            CountPresent(header.ProcessId, PresentStream::Dxgi);
+        }
         return;
+    }
 
-    if (header.ProcessId == 0)
+    if (IsEqualGUID(header.ProviderId, kD3d9Provider)) {
+        if (eventId == kD3d9PresentStartEventId)
+            CountPresent(header.ProcessId, PresentStream::D3d9);
         return;
+    }
 
-    std::scoped_lock lock(gMutex);
-    ++gCounts[header.ProcessId];
+    if (IsEqualGUID(header.ProviderId, kDxgKrnlProvider)) {
+        if (eventId == kDxgKrnlPresentHistoryStartEventId) {
+            CountPresent(header.ProcessId, PresentStream::DxgKrnlHistory);
+        } else if (eventId == kDxgKrnlPresentHistoryDetailedStartEventId) {
+            CountPresent(header.ProcessId, PresentStream::DxgKrnlDetailed);
+        }
+    }
 }
 
 std::vector<BYTE> MakeProperties(const std::wstring &sessionName)
@@ -103,15 +146,32 @@ bool StartEtw(const std::wstring &sessionName)
     if (rc != ERROR_SUCCESS)
         return false;
 
-    rc = EnableTraceEx2(gSession,
-                        &kDxgiProvider,
-                        EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-                        kTraceLevel,
-                        kDxgiKeyword,
-                        0,
-                        0,
-                        nullptr);
-    if (rc != ERROR_SUCCESS) {
+    bool providerEnabled = false;
+
+    const auto enableProvider =
+        [&](const GUID &provider, ULONGLONG keyword) {
+            const ULONG enableRc =
+                EnableTraceEx2(gSession,
+                               &provider,
+                               EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+                               kTraceLevel,
+                               keyword,
+                               0,
+                               0,
+                               nullptr);
+            if (enableRc == ERROR_SUCCESS)
+                providerEnabled = true;
+        };
+
+    // Runtime Present_Start events cover the common DXGI/D3D paths.
+    enableProvider(kDxgiProvider, kRuntimePresentKeyword);
+    enableProvider(kD3d9Provider, kRuntimePresentKeyword);
+
+    // DxgKrnl PresentHistory covers presentation paths that do not surface
+    // through the DXGI provider, including many modern/Vulkan game paths.
+    enableProvider(kDxgKrnlProvider, kDxgKrnlPresentKeyword);
+
+    if (!providerEnabled) {
         StopSession(sessionName);
         return false;
     }
@@ -133,29 +193,26 @@ bool StartEtw(const std::wstring &sessionName)
 void WriteStateFile(const std::wstring &path)
 {
     const ULONGLONG now = GetTickCount64();
-    std::map<DWORD, std::uint64_t> counts;
+    std::map<DWORD, std::array<std::uint64_t, kPresentStreamCount>> counts;
 
     {
         std::scoped_lock lock(gMutex);
         counts = gCounts;
     }
 
-    for (const auto &[pid, count] : counts) {
-        auto &state = gRates[pid];
-        state.samples.emplace_back(now, count);
+    for (const auto &[pid, streamCounts] : counts) {
+        auto &streams = gRates[pid];
 
-        while (state.samples.size() > 2 &&
-               static_cast<double>(now - state.samples.front().first) > kWindowMs) {
-            state.samples.pop_front();
-        }
-    }
+        for (size_t streamIndex = 0;
+             streamIndex < kPresentStreamCount;
+             ++streamIndex) {
+            auto &state = streams[streamIndex];
+            state.samples.emplace_back(now, streamCounts[streamIndex]);
 
-    for (auto it = gRates.begin(); it != gRates.end();) {
-        if (it->second.samples.empty() ||
-            now - it->second.samples.back().first > 5000) {
-            it = gRates.erase(it);
-        } else {
-            ++it;
+            while (state.samples.size() > 2 &&
+                   static_cast<double>(now - state.samples.front().first) > kWindowMs) {
+                state.samples.pop_front();
+            }
         }
     }
 
@@ -164,24 +221,34 @@ void WriteStateFile(const std::wstring &path)
     if (_wfopen_s(&fp, tmpPath.c_str(), L"wb") != 0 || !fp)
         return;
 
-    std::fprintf(fp, "# Clatasha HUD direct ETW FPS\n");
+    std::fprintf(fp, "# Clatasha HUD ETW FPS: DXGI,D3D9,DXGKRNL\n");
 
-    for (const auto &[pid, state] : gRates) {
-        if (state.samples.size() < 2)
-            continue;
+    for (const auto &[pid, streams] : gRates) {
+        double bestFps = 0.0;
 
-        const auto &first = state.samples.front();
-        const auto &last = state.samples.back();
-        const ULONGLONG spanMs = last.first - first.first;
-        if (spanMs < 120 || last.second < first.second)
-            continue;
+        for (const auto &state : streams) {
+            if (state.samples.size() < 2)
+                continue;
 
-        const double fps =
-            static_cast<double>(last.second - first.second) * 1000.0 /
-            static_cast<double>(spanMs);
+            const auto &first = state.samples.front();
+            const auto &last = state.samples.back();
+            const ULONGLONG spanMs = last.first - first.first;
+            if (spanMs < 120 || last.second < first.second)
+                continue;
 
-        if (fps > 0.0 && fps < 2000.0)
-            std::fprintf(fp, "%lu,%.3f\n", pid, fps);
+            const double fps =
+                static_cast<double>(last.second - first.second) * 1000.0 /
+                static_cast<double>(spanMs);
+
+            // The same present can appear in more than one ETW provider.
+            // Keep independent stream rates and use the strongest valid one
+            // instead of summing and accidentally doubling the FPS.
+            if (fps > bestFps && fps < 2000.0)
+                bestFps = fps;
+        }
+
+        if (bestFps > 0.0)
+            std::fprintf(fp, "%lu,%.3f\n", pid, bestFps);
     }
 
     std::fclose(fp);
