@@ -801,9 +801,12 @@ bool setBorderlessWindowGeometry(HWND hwnd)
     constexpr int kCompositionGuardPx = 1;
     const int compositedHeight = qMax(1, height - kCompositionGuardPx);
 
+    // Keep the game in the topmost band so it covers the Windows
+    // taskbar. The Clatasha HUD watchdog runs after this and reasserts the
+    // private HUD windows as topmost again, leaving the HUD above the game.
     return SetWindowPos(
                hwnd,
-               HWND_NOTOPMOST,
+               HWND_TOPMOST,
                area.left,
                area.top,
                width,
@@ -825,7 +828,7 @@ bool applyBorderlessStyle(HWND hwnd)
     style |= WS_POPUP;
 
     exStyle &= ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE |
-                 WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_TOPMOST);
+                 WS_EX_CLIENTEDGE | WS_EX_STATICEDGE);
 
     SetLastError(ERROR_SUCCESS);
     const LONG_PTR oldStyle = SetWindowLongPtrW(hwnd, GWL_STYLE, style);
@@ -2798,8 +2801,9 @@ static void show_settings()
             "Fullscreen removes the title bar and window buttons and fills "
             "the game's current monitor while leaving a one-pixel composition "
             "guard. This avoids Windows promoting the game into an exact "
-            "fullscreen DirectFlip path, giving private HUD overlays a better "
-            "chance to remain visible. Some elevated or protected games may block "
+            "fullscreen DirectFlip path. The game is kept above the Windows "
+            "taskbar while Clatasha reasserts its private HUD above the game. "
+            "Some elevated or protected games may block "
             "window-style changes."),
         gameWindowCard);
     gameWindowNote->setWordWrap(true);
