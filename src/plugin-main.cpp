@@ -791,13 +791,23 @@ bool setBorderlessWindowGeometry(HWND hwnd)
     const int width = area.right - area.left;
     const int height = area.bottom - area.top;
 
+    // Do not make the client region an exact physical-monitor match. Modern
+    // Windows can promote an exact borderless fullscreen window into
+    // DirectFlip / Independent Flip, allowing the game to bypass normal DWM
+    // composition and cover desktop HUD windows much like exclusive fullscreen.
+    //
+    // A one-pixel composition guard along the bottom is visually negligible but
+    // keeps this as a genuinely windowed/composited presentation mode.
+    constexpr int kCompositionGuardPx = 1;
+    const int compositedHeight = qMax(1, height - kCompositionGuardPx);
+
     return SetWindowPos(
                hwnd,
                HWND_NOTOPMOST,
                area.left,
                area.top,
                width,
-               height,
+               compositedHeight,
                SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOOWNERZORDER |
                    SWP_SHOWWINDOW) != FALSE;
 }
@@ -2785,10 +2795,11 @@ static void show_settings()
         QStringLiteral(
             "Clatasha remembers the last non-OBS foreground window. If the target "
             "is wrong, Alt-Tab to the game once, then return here. Borderless "
-            "Fullscreen removes the title bar and window buttons, fills the "
-            "game's current monitor, and keeps the game in normal Windows "
-            "desktop composition so private HUD overlays have a better chance "
-            "to remain visible. Some elevated or protected games may block "
+            "Fullscreen removes the title bar and window buttons and fills "
+            "the game's current monitor while leaving a one-pixel composition "
+            "guard. This avoids Windows promoting the game into an exact "
+            "fullscreen DirectFlip path, giving private HUD overlays a better "
+            "chance to remain visible. Some elevated or protected games may block "
             "window-style changes."),
         gameWindowCard);
     gameWindowNote->setWordWrap(true);
