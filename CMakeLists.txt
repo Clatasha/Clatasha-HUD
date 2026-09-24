@@ -49,19 +49,4 @@ if(WIN32)
   target_compile_definitions(clatasha-fps-helper PRIVATE UNICODE _UNICODE NOMINMAX)
   target_link_libraries(clatasha-fps-helper PRIVATE advapi32)
   install(TARGETS clatasha-fps-helper RUNTIME DESTINATION "${CMAKE_PROJECT_NAME}/data")
-
-  # Experimental x64 OpenGL fullscreen renderer probe. This is intentionally
-  # separate from the OBS module so the first renderer-path test is isolated.
-  add_library(clatasha-opengl-overlay SHARED src/opengl-overlay.cpp)
-  target_compile_definitions(clatasha-opengl-overlay PRIVATE UNICODE _UNICODE NOMINMAX)
-  target_link_libraries(clatasha-opengl-overlay PRIVATE opengl32)
-  set_target_properties(
-    clatasha-opengl-overlay
-    PROPERTIES
-      OUTPUT_NAME "clatasha-opengl-overlay"
-  )
-  install(
-    TARGETS clatasha-opengl-overlay
-    RUNTIME DESTINATION "${CMAKE_PROJECT_NAME}/data"
-  )
 endif()

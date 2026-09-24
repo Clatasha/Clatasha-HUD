@@ -16,7 +16,6 @@
 #include <deque>
 #include <map>
 #include <mutex>
-#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -66,10 +65,6 @@ struct RateState {
 
 using RateStreams = std::array<RateState, kPresentStreamCount>;
 std::map<DWORD, RateStreams> gRates;
-
-std::map<DWORD, std::string> gOpenGlProbeStatus;
-std::map<DWORD, ULONGLONG> gOpenGlProbeLastAttempt;
-std::map<DWORD, int> gOpenGlProbeAttempts;
 
 void CountPresent(DWORD pid, PresentStream stream)
 {
@@ -235,209 +230,6 @@ bool IsFullscreenForegroundWindow(HWND hwnd)
            bottomRight.y >= screen.bottom - tolerance;
 }
 
-std::wstring ProcessBaseName(DWORD pid)
-{
-    HANDLE process = OpenProcess(
-        PROCESS_QUERY_LIMITED_INFORMATION,
-        FALSE,
-        pid);
-    if (!process)
-        return {};
-
-    wchar_t path[MAX_PATH] = {};
-    DWORD length = MAX_PATH;
-    std::wstring result;
-
-    if (QueryFullProcessImageNameW(
-            process,
-            0,
-            path,
-            &length)) {
-        result.assign(path, length);
-        const size_t separator =
-            result.find_last_of(L"\\/");
-        if (separator != std::wstring::npos)
-            result.erase(0, separator + 1);
-    }
-
-    CloseHandle(process);
-    return result;
-}
-
-std::wstring OpenGlProbeDllPath()
-{
-    wchar_t path[MAX_PATH] = {};
-    const DWORD length =
-        GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (length == 0 || length >= MAX_PATH)
-        return {};
-
-    std::wstring result(path, length);
-    const size_t separator =
-        result.find_last_of(L"\\/");
-    if (separator == std::wstring::npos)
-        return {};
-
-    result.erase(separator + 1);
-    result += L"clatasha-opengl-overlay.dll";
-    return result;
-}
-
-bool IsNative64BitProcess(DWORD pid)
-{
-#if defined(_WIN64)
-    HANDLE process = OpenProcess(
-        PROCESS_QUERY_LIMITED_INFORMATION,
-        FALSE,
-        pid);
-    if (!process)
-        return false;
-
-    BOOL wow64 = FALSE;
-    const BOOL ok = IsWow64Process(process, &wow64);
-    CloseHandle(process);
-
-    return ok && !wow64;
-#else
-    (void)pid;
-    return false;
-#endif
-}
-
-bool InjectLibrary(DWORD pid, const std::wstring &dllPath)
-{
-    if (pid == 0 || dllPath.empty())
-        return false;
-
-    HANDLE process = OpenProcess(
-        PROCESS_CREATE_THREAD |
-            PROCESS_QUERY_INFORMATION |
-            PROCESS_VM_OPERATION |
-            PROCESS_VM_WRITE |
-            PROCESS_VM_READ,
-        FALSE,
-        pid);
-    if (!process)
-        return false;
-
-    const SIZE_T bytes =
-        (dllPath.size() + 1) * sizeof(wchar_t);
-    void *remotePath = VirtualAllocEx(
-        process,
-        nullptr,
-        bytes,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_READWRITE);
-    if (!remotePath) {
-        CloseHandle(process);
-        return false;
-    }
-
-    SIZE_T written = 0;
-    const bool wrote =
-        WriteProcessMemory(
-            process,
-            remotePath,
-            dllPath.c_str(),
-            bytes,
-            &written) &&
-        written == bytes;
-
-    auto loadLibrary =
-        reinterpret_cast<LPTHREAD_START_ROUTINE>(
-            GetProcAddress(
-                GetModuleHandleW(L"kernel32.dll"),
-                "LoadLibraryW"));
-
-    HANDLE thread = nullptr;
-    if (wrote && loadLibrary) {
-        thread = CreateRemoteThread(
-            process,
-            nullptr,
-            0,
-            loadLibrary,
-            remotePath,
-            0,
-            nullptr);
-    }
-
-    bool loaded = false;
-    if (thread) {
-        if (WaitForSingleObject(thread, 5000) == WAIT_OBJECT_0) {
-            DWORD moduleResult = 0;
-            if (GetExitCodeThread(thread, &moduleResult) &&
-                moduleResult != 0) {
-                loaded = true;
-            }
-        }
-        CloseHandle(thread);
-    }
-
-    VirtualFreeEx(
-        process,
-        remotePath,
-        0,
-        MEM_RELEASE);
-    CloseHandle(process);
-    return loaded;
-}
-
-void MaybeInjectOpenGlProbe(
-    DWORD pid,
-    bool fullscreen,
-    const std::string &renderer)
-{
-    if (!fullscreen || renderer != "OGL" || pid == 0)
-        return;
-
-    // First proof is intentionally restricted to the user's known x64
-    // OpenGL test application. Do not inject into arbitrary games yet.
-    const std::wstring processName = ProcessBaseName(pid);
-    if (_wcsicmp(processName.c_str(), L"Allumeria.exe") != 0)
-        return;
-
-    if (!IsNative64BitProcess(pid)) {
-        gOpenGlProbeStatus[pid] = "x64-required";
-        return;
-    }
-
-    if (gOpenGlProbeStatus[pid] == "injected")
-        return;
-
-    const ULONGLONG now = GetTickCount64();
-    const ULONGLONG lastAttempt =
-        gOpenGlProbeLastAttempt[pid];
-    if (lastAttempt != 0 && now - lastAttempt < 1500)
-        return;
-
-    int &attempts = gOpenGlProbeAttempts[pid];
-    if (attempts >= 3)
-        return;
-
-    ++attempts;
-    gOpenGlProbeLastAttempt[pid] = now;
-
-    const std::wstring dllPath =
-        OpenGlProbeDllPath();
-    const DWORD attributes =
-        dllPath.empty()
-            ? INVALID_FILE_ATTRIBUTES
-            : GetFileAttributesW(dllPath.c_str());
-
-    if (attributes == INVALID_FILE_ATTRIBUTES ||
-        (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-        gOpenGlProbeStatus[pid] = "dll-missing";
-        return;
-    }
-
-    if (InjectLibrary(pid, dllPath)) {
-        gOpenGlProbeStatus[pid] = "injected";
-    } else {
-        gOpenGlProbeStatus[pid] =
-            attempts >= 3 ? "failed" : "retrying";
-    }
-}
-
 std::string RendererTagForProcess(DWORD pid)
 {
     if (pid == 0)
@@ -517,12 +309,6 @@ void WriteStateFile(const std::wstring &path)
         IsFullscreenForegroundWindow(foreground);
     const std::string foregroundRenderer =
         RendererTagForProcess(foregroundPid);
-
-    MaybeInjectOpenGlProbe(
-        foregroundPid,
-        foregroundFullscreen,
-        foregroundRenderer);
-
     bool foregroundWritten = false;
     std::map<DWORD, std::array<std::uint64_t, kPresentStreamCount>> counts;
 
@@ -552,7 +338,7 @@ void WriteStateFile(const std::wstring &path)
     if (_wfopen_s(&fp, tmpPath.c_str(), L"wb") != 0 || !fp)
         return;
 
-    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_probe (foreground metadata)\n");
+    std::fprintf(fp, "# pid,fps,renderer,fullscreen (renderer/fullscreen on foreground target)\n");
 
     for (const auto &[pid, streams] : gRates) {
         double bestFps = 0.0;
@@ -582,12 +368,11 @@ void WriteStateFile(const std::wstring &path)
             if (pid == foregroundPid && !foregroundRenderer.empty()) {
                 std::fprintf(
                     fp,
-                    "%lu,%.3f,%s,%d,%s\n",
+                    "%lu,%.3f,%s,%d\n",
                     pid,
                     bestFps,
                     foregroundRenderer.c_str(),
-                    foregroundFullscreen ? 1 : 0,
-                    gOpenGlProbeStatus[pid].c_str());
+                    foregroundFullscreen ? 1 : 0);
                 foregroundWritten = true;
             } else {
                 std::fprintf(fp, "%lu,%.3f\n", pid, bestFps);
@@ -603,11 +388,10 @@ void WriteStateFile(const std::wstring &path)
         !foregroundWritten) {
         std::fprintf(
             fp,
-            "%lu,0.000,%s,%d,%s\n",
+            "%lu,0.000,%s,%d\n",
             foregroundPid,
             foregroundRenderer.c_str(),
-            foregroundFullscreen ? 1 : 0,
-            gOpenGlProbeStatus[foregroundPid].c_str());
+            foregroundFullscreen ? 1 : 0);
     }
 
     std::fclose(fp);
