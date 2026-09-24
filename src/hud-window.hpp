@@ -42,9 +42,6 @@ private:
     void stopFpsHelper();
     void readFpsState();
     void resetGameFps();
-    void updateOpenGlGameCaptureProbe();
-    void releaseOpenGlGameCaptureProbe();
-    bool queryOpenGlGameCaptureHooked() const;
     QString fpsStateFilePath() const;
     QString recordingPath() const;
     QString diskSpaceText() const;
@@ -75,11 +72,6 @@ private:
     obs_volmeter_t *micMeter_ = nullptr;
     obs_source_t *desktopSource_ = nullptr;
     obs_source_t *micSource_ = nullptr;
-    obs_source_t *openGlProbeSource_ = nullptr;
-    bool openGlProbeShowing_ = false;
-    bool openGlProbeActive_ = false;
-    bool openGlProbeHooked_ = false;
-    quint32 openGlProbePid_ = 0;
 
     std::atomic<float> desktopLevel_{0.0f};
     std::atomic<float> micLevel_{0.0f};
@@ -98,6 +90,7 @@ private:
     QString trackedGameExecutable_;
     QString detectedGameRenderer_;
     QString gameRenderer_;
+    QString openGlHookStatus_;
     bool gameFullscreen_ = false;
     int rendererMissSamples_ = 0;
     int gameTargetRefreshTicks_ = 0;

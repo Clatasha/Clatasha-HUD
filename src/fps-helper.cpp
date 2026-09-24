@@ -230,6 +230,311 @@ bool IsFullscreenForegroundWindow(HWND hwnd)
            bottomRight.y >= screen.bottom - tolerance;
 }
 
+constexpr std::uint32_t kOpenGlSharedMagic = 0x4C474F43;
+constexpr std::uint32_t kOpenGlSharedVersion = 1;
+
+struct alignas(8) OpenGlPresentShared {
+    std::uint32_t magic;
+    std::uint32_t version;
+    std::uint32_t pid;
+    std::uint32_t reserved;
+    volatile LONG64 presentCount;
+    volatile LONG64 lastPresentTick;
+    volatile LONG hookState;
+    volatile LONG hookedMask;
+};
+
+struct OpenGlRateState {
+    std::uint64_t lastCount = 0;
+    ULONGLONG lastSampleMs = 0;
+    double fps = 0.0;
+    bool initialized = false;
+};
+
+std::map<DWORD, OpenGlRateState> gOpenGlRates;
+std::map<DWORD, std::string> gOpenGlInjectStatus;
+std::map<DWORD, int> gOpenGlInjectAttempts;
+std::map<DWORD, ULONGLONG> gOpenGlInjectLastAttempt;
+
+std::wstring ProcessBaseName(DWORD pid)
+{
+    HANDLE process = OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION,
+        FALSE,
+        pid);
+    if (!process)
+        return {};
+
+    wchar_t path[MAX_PATH] = {};
+    DWORD length = MAX_PATH;
+    std::wstring result;
+
+    if (QueryFullProcessImageNameW(process, 0, path, &length)) {
+        result.assign(path, length);
+        const size_t separator = result.find_last_of(L"\\/");
+        if (separator != std::wstring::npos)
+            result.erase(0, separator + 1);
+    }
+
+    CloseHandle(process);
+    return result;
+}
+
+bool IsNative64BitProcess(DWORD pid)
+{
+#if defined(_WIN64)
+    HANDLE process = OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION,
+        FALSE,
+        pid);
+    if (!process)
+        return false;
+
+    BOOL wow64 = FALSE;
+    const BOOL ok = IsWow64Process(process, &wow64);
+    CloseHandle(process);
+    return ok && !wow64;
+#else
+    (void)pid;
+    return false;
+#endif
+}
+
+std::wstring OpenGlHookDllPath()
+{
+    wchar_t path[MAX_PATH] = {};
+    const DWORD length =
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+        return {};
+
+    std::wstring result(path, length);
+    const size_t separator = result.find_last_of(L"\\/");
+    if (separator == std::wstring::npos)
+        return {};
+
+    result.erase(separator + 1);
+    result += L"clatasha-opengl-present-hook.dll";
+    return result;
+}
+
+bool InjectLibrary(DWORD pid, const std::wstring &dllPath)
+{
+    HANDLE process = OpenProcess(
+        PROCESS_CREATE_THREAD |
+            PROCESS_QUERY_INFORMATION |
+            PROCESS_VM_OPERATION |
+            PROCESS_VM_WRITE |
+            PROCESS_VM_READ,
+        FALSE,
+        pid);
+    if (!process)
+        return false;
+
+    const SIZE_T bytes =
+        (dllPath.size() + 1) * sizeof(wchar_t);
+    void *remotePath = VirtualAllocEx(
+        process,
+        nullptr,
+        bytes,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE);
+
+    if (!remotePath) {
+        CloseHandle(process);
+        return false;
+    }
+
+    SIZE_T written = 0;
+    const bool wrote =
+        WriteProcessMemory(
+            process,
+            remotePath,
+            dllPath.c_str(),
+            bytes,
+            &written) &&
+        written == bytes;
+
+    auto loadLibrary =
+        reinterpret_cast<LPTHREAD_START_ROUTINE>(
+            GetProcAddress(
+                GetModuleHandleW(L"kernel32.dll"),
+                "LoadLibraryW"));
+
+    HANDLE thread = nullptr;
+    if (wrote && loadLibrary) {
+        thread = CreateRemoteThread(
+            process,
+            nullptr,
+            0,
+            loadLibrary,
+            remotePath,
+            0,
+            nullptr);
+    }
+
+    bool loaded = false;
+    if (thread) {
+        if (WaitForSingleObject(thread, 5000) == WAIT_OBJECT_0) {
+            DWORD moduleResult = 0;
+            if (GetExitCodeThread(thread, &moduleResult) &&
+                moduleResult != 0) {
+                loaded = true;
+            }
+        }
+        CloseHandle(thread);
+    }
+
+    VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
+    CloseHandle(process);
+    return loaded;
+}
+
+void MaybeInjectOpenGlHook(
+    DWORD pid,
+    const std::string &renderer)
+{
+    if (pid == 0 || renderer != "OGL")
+        return;
+
+    const std::wstring processName = ProcessBaseName(pid);
+    if (_wcsicmp(processName.c_str(), L"Allumeria.exe") != 0)
+        return;
+
+    if (!IsNative64BitProcess(pid)) {
+        gOpenGlInjectStatus[pid] = "x64-required";
+        return;
+    }
+
+    const std::string current = gOpenGlInjectStatus[pid];
+    if (current == "loaded" || current == "active")
+        return;
+
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG lastAttempt = gOpenGlInjectLastAttempt[pid];
+    if (lastAttempt != 0 && now - lastAttempt < 1500)
+        return;
+
+    int &attempts = gOpenGlInjectAttempts[pid];
+    if (attempts >= 3) {
+        gOpenGlInjectStatus[pid] = "failed";
+        return;
+    }
+
+    ++attempts;
+    gOpenGlInjectLastAttempt[pid] = now;
+
+    const std::wstring dllPath = OpenGlHookDllPath();
+    const DWORD attributes =
+        dllPath.empty()
+            ? INVALID_FILE_ATTRIBUTES
+            : GetFileAttributesW(dllPath.c_str());
+
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        gOpenGlInjectStatus[pid] = "dll-missing";
+        return;
+    }
+
+    gOpenGlInjectStatus[pid] =
+        InjectLibrary(pid, dllPath)
+            ? "loaded"
+            : (attempts >= 3 ? "failed" : "retrying");
+}
+
+struct OpenGlSample {
+    double fps = 0.0;
+    bool validFps = false;
+    std::string status = "off";
+    LONG hookedMask = 0;
+};
+
+OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now)
+{
+    OpenGlSample result;
+    if (pid == 0)
+        return result;
+
+    auto injectIt = gOpenGlInjectStatus.find(pid);
+    if (injectIt != gOpenGlInjectStatus.end())
+        result.status = injectIt->second;
+
+    wchar_t name[96] = {};
+    swprintf_s(name, L"Local\\ClatashaHUD_OGL_%lu", pid);
+
+    HANDLE mapping = OpenFileMappingW(
+        FILE_MAP_READ,
+        FALSE,
+        name);
+    if (!mapping)
+        return result;
+
+    const auto *shared =
+        static_cast<const OpenGlPresentShared *>(
+            MapViewOfFile(
+                mapping,
+                FILE_MAP_READ,
+                0,
+                0,
+                sizeof(OpenGlPresentShared)));
+    if (!shared) {
+        CloseHandle(mapping);
+        return result;
+    }
+
+    if (shared->magic == kOpenGlSharedMagic &&
+        shared->version == kOpenGlSharedVersion &&
+        shared->pid == pid) {
+        const LONG state = shared->hookState;
+        result.hookedMask = shared->hookedMask;
+
+        if (state == 1) {
+            result.status = "active";
+            gOpenGlInjectStatus[pid] = "active";
+        } else if (state == 2) {
+            result.status = "hook-failed";
+        } else {
+            result.status = "loading";
+        }
+
+        const std::uint64_t count =
+            static_cast<std::uint64_t>(shared->presentCount);
+        const ULONGLONG lastPresent =
+            static_cast<ULONGLONG>(shared->lastPresentTick);
+
+        auto &rate = gOpenGlRates[pid];
+        if (!rate.initialized) {
+            rate.lastCount = count;
+            rate.lastSampleMs = now;
+            rate.initialized = true;
+        } else {
+            const ULONGLONG elapsed = now - rate.lastSampleMs;
+            if (elapsed >= 200 && count >= rate.lastCount) {
+                rate.fps =
+                    static_cast<double>(count - rate.lastCount) *
+                    1000.0 /
+                    static_cast<double>(elapsed);
+                rate.lastCount = count;
+                rate.lastSampleMs = now;
+            }
+        }
+
+        if (state == 1 &&
+            lastPresent != 0 &&
+            now >= lastPresent &&
+            now - lastPresent <= 1500 &&
+            rate.fps > 0.0 &&
+            rate.fps < 2000.0) {
+            result.fps = rate.fps;
+            result.validFps = true;
+        }
+    }
+
+    UnmapViewOfFile(shared);
+    CloseHandle(mapping);
+    return result;
+}
+
 std::string RendererTagForProcess(DWORD pid)
 {
     if (pid == 0)
@@ -309,6 +614,13 @@ void WriteStateFile(const std::wstring &path)
         IsFullscreenForegroundWindow(foreground);
     const std::string foregroundRenderer =
         RendererTagForProcess(foregroundPid);
+
+    MaybeInjectOpenGlHook(
+        foregroundPid,
+        foregroundRenderer);
+    const OpenGlSample openGlSample =
+        ReadOpenGlSample(foregroundPid, now);
+
     bool foregroundWritten = false;
     std::map<DWORD, std::array<std::uint64_t, kPresentStreamCount>> counts;
 
@@ -338,7 +650,7 @@ void WriteStateFile(const std::wstring &path)
     if (_wfopen_s(&fp, tmpPath.c_str(), L"wb") != 0 || !fp)
         return;
 
-    std::fprintf(fp, "# pid,fps,renderer,fullscreen (renderer/fullscreen on foreground target)\n");
+    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_hook,ogl_mask\n");
 
     for (const auto &[pid, streams] : gRates) {
         double bestFps = 0.0;
@@ -364,15 +676,23 @@ void WriteStateFile(const std::wstring &path)
                 bestFps = fps;
         }
 
+        if (pid == foregroundPid &&
+            foregroundRenderer == "OGL" &&
+            openGlSample.validFps) {
+            bestFps = openGlSample.fps;
+        }
+
         if (bestFps > 0.0) {
             if (pid == foregroundPid && !foregroundRenderer.empty()) {
                 std::fprintf(
                     fp,
-                    "%lu,%.3f,%s,%d\n",
+                    "%lu,%.3f,%s,%d,%s,%ld\n",
                     pid,
                     bestFps,
                     foregroundRenderer.c_str(),
-                    foregroundFullscreen ? 1 : 0);
+                    foregroundFullscreen ? 1 : 0,
+                    openGlSample.status.c_str(),
+                    openGlSample.hookedMask);
                 foregroundWritten = true;
             } else {
                 std::fprintf(fp, "%lu,%.3f\n", pid, bestFps);
@@ -388,10 +708,13 @@ void WriteStateFile(const std::wstring &path)
         !foregroundWritten) {
         std::fprintf(
             fp,
-            "%lu,0.000,%s,%d\n",
+            "%lu,%.3f,%s,%d,%s,%ld\n",
             foregroundPid,
+            openGlSample.validFps ? openGlSample.fps : 0.0,
             foregroundRenderer.c_str(),
-            foregroundFullscreen ? 1 : 0);
+            foregroundFullscreen ? 1 : 0,
+            openGlSample.status.c_str(),
+            openGlSample.hookedMask);
     }
 
     std::fclose(fp);

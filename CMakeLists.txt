@@ -49,4 +49,23 @@ if(WIN32)
   target_compile_definitions(clatasha-fps-helper PRIVATE UNICODE _UNICODE NOMINMAX)
   target_link_libraries(clatasha-fps-helper PRIVATE advapi32)
   install(TARGETS clatasha-fps-helper RUNTIME DESTINATION "${CMAKE_PROJECT_NAME}/data")
+
+  find_package(Detours REQUIRED)
+  add_library(clatasha-opengl-present-hook SHARED src/opengl-present-hook.cpp)
+  target_compile_definitions(
+    clatasha-opengl-present-hook
+    PRIVATE UNICODE _UNICODE NOMINMAX
+  )
+  target_link_libraries(
+    clatasha-opengl-present-hook
+    PRIVATE Detours::Detours
+  )
+  set_target_properties(
+    clatasha-opengl-present-hook
+    PROPERTIES OUTPUT_NAME "clatasha-opengl-present-hook"
+  )
+  install(
+    TARGETS clatasha-opengl-present-hook
+    RUNTIME DESTINATION "${CMAKE_PROJECT_NAME}/data"
+  )
 endif()
