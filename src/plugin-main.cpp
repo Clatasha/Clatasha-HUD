@@ -169,6 +169,11 @@ GameBorderlessState g_gameBorderless;
 HWND g_lastExternalForegroundWindow = nullptr;
 bool g_keepGameBorderlessApplied = true;
 bool g_taskbarAutoHideChangedByClatasha = false;
+
+HWINEVENTHOOK g_topmostForegroundHook = nullptr;
+HWINEVENTHOOK g_topmostShowHook = nullptr;
+HWINEVENTHOOK g_topmostReorderHook = nullptr;
+std::atomic_bool g_topmostReassertQueued{false};
 #endif
 
 QString localFilePathFromValue(const QString &value)
@@ -661,6 +666,178 @@ private:
 };
 
 std::array<BrowserHudOverlay *, kOverlayCount> g_hudBrowserOverlays{};
+
+void reassertClatashaTopmostWindows()
+{
+    if (g_frontendExiting)
+        return;
+
+#ifdef Q_OS_WIN
+    if (g_hud && g_hudWantedVisible && g_hud->isVisible()) {
+        const HWND hwnd = reinterpret_cast<HWND>(g_hud->winId());
+        if (hwnd && IsWindow(hwnd)) {
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE |
+                    SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+        }
+    }
+
+    if (g_browserHudOverlaysWantedVisible) {
+        for (BrowserHudOverlay *overlay : g_hudBrowserOverlays) {
+            if (overlay)
+                overlay->ensureTopmost();
+        }
+    }
+#else
+    if (g_hud && g_hudWantedVisible && g_hud->isVisible())
+        g_hud->raise();
+
+    if (g_browserHudOverlaysWantedVisible) {
+        for (BrowserHudOverlay *overlay : g_hudBrowserOverlays) {
+            if (overlay)
+                overlay->ensureTopmost();
+        }
+    }
+#endif
+}
+
+#ifdef Q_OS_WIN
+void queueTopmostReassert()
+{
+    if (g_frontendExiting || !g_hud)
+        return;
+
+    bool expected = false;
+    if (!g_topmostReassertQueued.compare_exchange_strong(
+            expected,
+            true,
+            std::memory_order_acq_rel)) {
+        return;
+    }
+
+    QPointer<ClatashaHudWindow> hudGuard(g_hud);
+    QMetaObject::invokeMethod(
+        g_hud,
+        [hudGuard]() {
+            g_topmostReassertQueued.store(false, std::memory_order_release);
+            if (g_frontendExiting || !hudGuard)
+                return;
+
+            reassertClatashaTopmostWindows();
+        },
+        Qt::QueuedConnection);
+}
+
+void CALLBACK clatashaTopmostWinEvent(
+    HWINEVENTHOOK,
+    DWORD event,
+    HWND hwnd,
+    LONG idObject,
+    LONG idChild,
+    DWORD,
+    DWORD)
+{
+    if (g_frontendExiting)
+        return;
+
+    // Foreground changes are always relevant. For object events, ignore
+    // non-window child/control notifications to avoid unnecessary UI churn.
+    if (event != EVENT_SYSTEM_FOREGROUND) {
+        if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF)
+            return;
+    }
+
+    if (hwnd) {
+        DWORD processId = 0;
+        GetWindowThreadProcessId(hwnd, &processId);
+        if (processId == GetCurrentProcessId())
+            return;
+    }
+
+    queueTopmostReassert();
+}
+
+void startTopmostEventHooks()
+{
+    if (g_topmostForegroundHook || g_topmostShowHook ||
+        g_topmostReorderHook) {
+        return;
+    }
+
+    constexpr DWORD hookFlags =
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+
+    g_topmostForegroundHook = SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND,
+        EVENT_SYSTEM_FOREGROUND,
+        nullptr,
+        clatashaTopmostWinEvent,
+        0,
+        0,
+        hookFlags);
+
+    g_topmostShowHook = SetWinEventHook(
+        EVENT_OBJECT_SHOW,
+        EVENT_OBJECT_SHOW,
+        nullptr,
+        clatashaTopmostWinEvent,
+        0,
+        0,
+        hookFlags);
+
+    g_topmostReorderHook = SetWinEventHook(
+        EVENT_OBJECT_REORDER,
+        EVENT_OBJECT_REORDER,
+        nullptr,
+        clatashaTopmostWinEvent,
+        0,
+        0,
+        hookFlags);
+
+    if (g_topmostForegroundHook || g_topmostShowHook ||
+        g_topmostReorderHook) {
+        blog(LOG_INFO,
+             "[Clatasha HUD] Event-driven topmost guard enabled");
+    } else {
+        blog(LOG_WARNING,
+             "[Clatasha HUD] Event-driven topmost guard unavailable; watchdog fallback remains active");
+    }
+}
+
+void stopTopmostEventHooks()
+{
+    if (g_topmostForegroundHook) {
+        UnhookWinEvent(g_topmostForegroundHook);
+        g_topmostForegroundHook = nullptr;
+    }
+
+    if (g_topmostShowHook) {
+        UnhookWinEvent(g_topmostShowHook);
+        g_topmostShowHook = nullptr;
+    }
+
+    if (g_topmostReorderHook) {
+        UnhookWinEvent(g_topmostReorderHook);
+        g_topmostReorderHook = nullptr;
+    }
+
+    g_topmostReassertQueued.store(false, std::memory_order_release);
+}
+#else
+void startTopmostEventHooks()
+{
+}
+
+void stopTopmostEventHooks()
+{
+}
+#endif
 
 bool showHudOverlaySlot(int index, const OverlayConfig &config, bool forceVisible = false)
 {
@@ -2432,49 +2609,34 @@ static void ensure_hud()
         trackExternalForegroundWindow();
         maintainGameBorderless();
 
-        if (g_browserHudOverlaysWantedVisible) {
-            for (BrowserHudOverlay *overlay : g_hudBrowserOverlays) {
-                if (overlay)
-                    overlay->ensureTopmost();
-            }
-        }
-
-        if (!g_hud || !g_hudWantedVisible)
+        if (!g_hud)
             return;
 
         bool restored = false;
-        if (!g_hud->isVisible()) {
+        if (g_hudWantedVisible && !g_hud->isVisible()) {
             g_hud->show();
             g_hud->positionHud();
             restored = true;
         }
 
 #ifdef Q_OS_WIN
-        const HWND hwnd = reinterpret_cast<HWND>(g_hud->winId());
-        if (hwnd) {
-            if (IsIconic(hwnd)) {
+        if (g_hudWantedVisible) {
+            const HWND hwnd = reinterpret_cast<HWND>(g_hud->winId());
+            if (hwnd && IsIconic(hwnd)) {
                 ShowWindow(hwnd, SW_RESTORE);
                 restored = true;
             }
-
-            SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
         }
-#else
-        if (restored)
-            g_hud->raise();
 #endif
+
+        reassertClatashaTopmostWindows();
 
         if (restored)
             blog(LOG_INFO, "[Clatasha HUD] Restored main HUD visibility");
     });
     g_hudWatchdog->start();
+    startTopmostEventHooks();
+    reassertClatashaTopmostWindows();
 
     QObject::connect(g_hud, &QObject::destroyed, []() {
         g_hudWatchdog = nullptr;
@@ -2494,21 +2656,7 @@ static void toggle_hud()
 
     g_hud->show();
     g_hud->positionHud();
-    g_hud->raise();
-
-#ifdef Q_OS_WIN
-    const HWND hwnd = reinterpret_cast<HWND>(g_hud->winId());
-    if (hwnd) {
-        SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
-    }
-#endif
+    reassertClatashaTopmostWindows();
 }
 
 enum class HudHotkeyAction : int {
@@ -3936,6 +4084,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
     case OBS_FRONTEND_EVENT_EXIT:
         restoreGameBorderlessWindow();
         g_frontendExiting = true;
+        stopTopmostEventHooks();
         shutdownUpdateChecker();
         g_hudWantedVisible = false;
         destroyHudOverlays();
@@ -3981,6 +4130,7 @@ void obs_module_unload(void)
     g_hudWantedVisible = false;
     g_frontendExiting = true;
 
+    stopTopmostEventHooks();
     shutdownUpdateChecker();
 
     unregisterHudHotkeys();
