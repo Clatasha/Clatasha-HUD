@@ -87,7 +87,10 @@ private:
     double gameFps_ = 0.0;
     bool gameFpsValid_ = false;
     quint32 trackedGamePid_ = 0;
+    QString detectedGameRenderer_;
     QString gameRenderer_;
+    bool gameFullscreen_ = false;
+    int rendererMissSamples_ = 0;
     int gameTargetRefreshTicks_ = 0;
     int fpsStateRefreshTicks_ = 0;
     QString timerText_ = QStringLiteral("0:00:00");

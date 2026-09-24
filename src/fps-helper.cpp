@@ -191,6 +191,45 @@ bool StartEtw(const std::wstring &sessionName)
     return true;
 }
 
+bool IsFullscreenForegroundWindow(HWND hwnd)
+{
+    if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd))
+        return false;
+
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if ((style & WS_CHILD) != 0)
+        return false;
+
+    RECT client{};
+    if (!GetClientRect(hwnd, &client))
+        return false;
+
+    POINT topLeft{client.left, client.top};
+    POINT bottomRight{client.right, client.bottom};
+    if (!ClientToScreen(hwnd, &topLeft) ||
+        !ClientToScreen(hwnd, &bottomRight)) {
+        return false;
+    }
+
+    const HMONITOR monitor =
+        MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if (!monitor)
+        return false;
+
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo))
+        return false;
+
+    constexpr LONG tolerance = 3;
+    const RECT &screen = monitorInfo.rcMonitor;
+
+    return topLeft.x <= screen.left + tolerance &&
+           topLeft.y <= screen.top + tolerance &&
+           bottomRight.x >= screen.right - tolerance &&
+           bottomRight.y >= screen.bottom - tolerance;
+}
+
 std::string RendererTagForProcess(DWORD pid)
 {
     if (pid == 0)
@@ -262,9 +301,12 @@ void WriteStateFile(const std::wstring &path)
     const ULONGLONG now = GetTickCount64();
 
     DWORD foregroundPid = 0;
-    if (const HWND foreground = GetForegroundWindow())
+    const HWND foreground = GetForegroundWindow();
+    if (foreground)
         GetWindowThreadProcessId(foreground, &foregroundPid);
 
+    const bool foregroundFullscreen =
+        IsFullscreenForegroundWindow(foreground);
     const std::string foregroundRenderer =
         RendererTagForProcess(foregroundPid);
     bool foregroundWritten = false;
@@ -296,7 +338,7 @@ void WriteStateFile(const std::wstring &path)
     if (_wfopen_s(&fp, tmpPath.c_str(), L"wb") != 0 || !fp)
         return;
 
-    std::fprintf(fp, "# Clatasha HUD ETW FPS: DXGI,D3D9,DXGKRNL\n");
+    std::fprintf(fp, "# pid,fps,renderer,fullscreen (renderer/fullscreen on foreground target)\n");
 
     for (const auto &[pid, streams] : gRates) {
         double bestFps = 0.0;
@@ -326,10 +368,11 @@ void WriteStateFile(const std::wstring &path)
             if (pid == foregroundPid && !foregroundRenderer.empty()) {
                 std::fprintf(
                     fp,
-                    "%lu,%.3f,%s\n",
+                    "%lu,%.3f,%s,%d\n",
                     pid,
                     bestFps,
-                    foregroundRenderer.c_str());
+                    foregroundRenderer.c_str(),
+                    foregroundFullscreen ? 1 : 0);
                 foregroundWritten = true;
             } else {
                 std::fprintf(fp, "%lu,%.3f\n", pid, bestFps);
@@ -345,9 +388,10 @@ void WriteStateFile(const std::wstring &path)
         !foregroundWritten) {
         std::fprintf(
             fp,
-            "%lu,0.000,%s\n",
+            "%lu,0.000,%s,%d\n",
             foregroundPid,
-            foregroundRenderer.c_str());
+            foregroundRenderer.c_str(),
+            foregroundFullscreen ? 1 : 0);
     }
 
     std::fclose(fp);

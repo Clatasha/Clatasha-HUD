@@ -323,10 +323,11 @@ void ClatashaHudWindow::updateForegroundGame()
 
     trackedGamePid_ = newPid;
     resetGameFps();
-    if (!gameRenderer_.isEmpty()) {
-        gameRenderer_.clear();
-        update();
-    }
+    detectedGameRenderer_.clear();
+    gameRenderer_.clear();
+    gameFullscreen_ = false;
+    rendererMissSamples_ = 0;
+    update();
 
     wchar_t imagePath[MAX_PATH] = {};
     QString processName;
@@ -390,6 +391,7 @@ void ClatashaHudWindow::readFpsState()
     bool targetRowFound = false;
     double fps = 0.0;
     QString renderer;
+    bool fullscreen = false;
 
     while (!file.atEnd()) {
         const QByteArray line = file.readLine().trimmed();
@@ -411,6 +413,8 @@ void ClatashaHudWindow::readFpsState()
         targetRowFound = true;
         if (fields.size() >= 3)
             renderer = QString::fromUtf8(fields.at(2)).trimmed().toUpper();
+        if (fields.size() >= 4)
+            fullscreen = fields.at(3).trimmed() == "1";
 
         if (fpsOk && std::isfinite(value) && value > 0.0 && value < 2000.0) {
             fps = value;
@@ -419,17 +423,33 @@ void ClatashaHudWindow::readFpsState()
         break;
     }
 
-    if (!targetRowFound)
-        renderer.clear();
+    if (targetRowFound && !renderer.isEmpty()) {
+        rendererMissSamples_ = 0;
+        detectedGameRenderer_ = renderer;
+    } else if (++rendererMissSamples_ >= 4) {
+        detectedGameRenderer_.clear();
+        rendererMissSamples_ = 4;
+    }
 
-    if (renderer != gameRenderer_) {
-        gameRenderer_ = renderer;
-        blog(LOG_INFO,
-             "[Clatasha HUD] Renderer target PID %u: %s",
-             trackedGamePid_,
-             gameRenderer_.isEmpty()
-                 ? "unknown"
-                 : gameRenderer_.toUtf8().constData());
+    const QString activeRenderer =
+        fullscreen ? detectedGameRenderer_ : QString();
+    const bool stateChanged =
+        activeRenderer != gameRenderer_ || fullscreen != gameFullscreen_;
+
+    if (stateChanged) {
+        gameRenderer_ = activeRenderer;
+        gameFullscreen_ = fullscreen;
+
+        if (gameFullscreen_ && !gameRenderer_.isEmpty()) {
+            blog(LOG_INFO,
+                 "[Clatasha HUD] Fullscreen renderer switch candidate PID %u: %s",
+                 trackedGamePid_,
+                 gameRenderer_.toUtf8().constData());
+        } else if (!gameFullscreen_) {
+            blog(LOG_INFO,
+                 "[Clatasha HUD] Renderer target PID %u returned to desktop/windowed mode",
+                 trackedGamePid_);
+        }
     }
 
     if (found) {
