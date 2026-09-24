@@ -118,6 +118,7 @@ std::thread g_updateWorker;
 QObject *g_updateCallbackContext = nullptr;
 #endif
 QPointer<QLabel> g_settingsVersionLabel;
+QPointer<QLabel> g_settingsCurrentCheckIcon;
 QPointer<QPushButton> g_settingsUpdateButton;
 
 constexpr int kOverlayCount = 5;
@@ -756,11 +757,18 @@ bool isReleaseNewerThanInstalled(const QString &latest)
 
 void refreshSettingsUpdateUi()
 {
-    if (g_settingsVersionLabel) {
-        QString label = QStringLiteral("v%1").arg(currentHudVersion());
-        if (g_updateCheck.checkedSuccessfully && !g_updateCheck.updateAvailable)
-            label += QStringLiteral("  ✓");
-        g_settingsVersionLabel->setText(label);
+    if (g_settingsVersionLabel)
+        g_settingsVersionLabel->setText(
+            QStringLiteral("v%1").arg(currentHudVersion()));
+
+    const bool isCurrent =
+        g_updateCheck.checkedSuccessfully && !g_updateCheck.updateAvailable;
+    if (g_settingsCurrentCheckIcon) {
+        g_settingsCurrentCheckIcon->setVisible(isCurrent);
+        g_settingsCurrentCheckIcon->setToolTip(
+            isCurrent
+                ? QStringLiteral("Clatasha HUD is up to date.")
+                : QString());
     }
 
     if (!g_settingsUpdateButton)
@@ -3433,6 +3441,16 @@ static void show_settings()
     versionLabel->setObjectName(QStringLiteral("versionLabel"));
     g_settingsVersionLabel = versionLabel;
 
+    auto *currentCheckIcon = new QLabel(header);
+    currentCheckIcon->setObjectName(QStringLiteral("currentVersionCheck"));
+    currentCheckIcon->setFixedSize(16, 16);
+    currentCheckIcon->setAlignment(Qt::AlignCenter);
+    currentCheckIcon->setPixmap(
+        QIcon(QStringLiteral(":/clatasha/icons/checkmark.svg"))
+            .pixmap(QSize(14, 14)));
+    currentCheckIcon->hide();
+    g_settingsCurrentCheckIcon = currentCheckIcon;
+
     auto *updateButton =
         new QPushButton(QStringLiteral("●  Update available"), header);
     updateButton->setObjectName(QStringLiteral("updateButton"));
@@ -3440,14 +3458,19 @@ static void show_settings()
     updateButton->hide();
     g_settingsUpdateButton = updateButton;
 
-    auto *donateButton = new QPushButton(QStringLiteral("♥  Donate"), header);
+    auto *donateButton = new QPushButton(QStringLiteral("Donate"), header);
     donateButton->setObjectName(QStringLiteral("donateButton"));
+    donateButton->setIcon(
+        QIcon(QStringLiteral(":/clatasha/icons/donate-heart.svg")));
+    donateButton->setIconSize(QSize(16, 16));
     donateButton->setCursor(Qt::PointingHandCursor);
 
     headerLayout->addWidget(brandLogo);
     headerLayout->addWidget(brandText);
     headerLayout->addStretch();
     headerLayout->addWidget(versionLabel);
+    headerLayout->addSpacing(3);
+    headerLayout->addWidget(currentCheckIcon);
     headerLayout->addSpacing(6);
     headerLayout->addWidget(updateButton);
     headerLayout->addSpacing(6);
@@ -3462,6 +3485,7 @@ static void show_settings()
 
     QObject::connect(&dialog, &QObject::destroyed, []() {
         g_settingsVersionLabel.clear();
+        g_settingsCurrentCheckIcon.clear();
         g_settingsUpdateButton.clear();
     });
 
@@ -3661,9 +3685,9 @@ static void show_settings()
         QStringLiteral(":/clatasha/icons/advanced.svg"),
         false);
     auto *aboutNav = addNavButton(
-        QStringLiteral("ⓘ   About"),
+        QStringLiteral("About"),
         aboutPageIndex,
-        QString(),
+        QStringLiteral(":/clatasha/icons/about.svg"),
         true);
 
     // Browser Overlays is the most-used configuration page and mirrors the concept.
@@ -3673,25 +3697,45 @@ static void show_settings()
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply, &dialog);
 
-    auto *applyToast = new QLabel(QStringLiteral("✓ Changes applied"), &dialog);
+    auto *applyToast = new QFrame(&dialog);
+    applyToast->setObjectName(QStringLiteral("applyToast"));
     applyToast->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+
+    auto *applyToastLayout = new QHBoxLayout(applyToast);
+    applyToastLayout->setContentsMargins(12, 8, 14, 8);
+    applyToastLayout->setSpacing(7);
+
+    auto *applyToastIcon = new QLabel(applyToast);
+    applyToastIcon->setFixedSize(16, 16);
+    applyToastIcon->setAlignment(Qt::AlignCenter);
+    applyToastIcon->setPixmap(
+        QIcon(QStringLiteral(":/clatasha/icons/checkmark.svg"))
+            .pixmap(QSize(14, 14)));
+
+    auto *applyToastText =
+        new QLabel(QStringLiteral("Changes applied"), applyToast);
+    applyToastText->setObjectName(QStringLiteral("applyToastText"));
+
+    applyToastLayout->addWidget(applyToastIcon);
+    applyToastLayout->addWidget(applyToastText);
     applyToast->setStyleSheet(QStringLiteral(
-        "QLabel {"
+        "QFrame#applyToast {"
         " background:#153820;"
-        " color:#bdf5c9;"
         " border:1px solid #2d7140;"
         " border-radius:7px;"
-        " padding:8px 14px;"
+        "}"
+        "QLabel#applyToastText {"
+        " color:#bdf5c9;"
         " font-weight:600;"
+        " background:transparent;"
         "}"));
     applyToast->hide();
 
     auto *toastTimer = new QTimer(&dialog);
     toastTimer->setSingleShot(true);
-    QObject::connect(toastTimer, &QTimer::timeout, applyToast, &QLabel::hide);
+    QObject::connect(toastTimer, &QTimer::timeout, applyToast, &QWidget::hide);
 
     auto showApplyToast = [&]() {
-        applyToast->setText(QStringLiteral("✓ Changes applied"));
         applyToast->adjustSize();
         applyToast->move(
             qMax(12, (dialog.width() - applyToast->width()) / 2),

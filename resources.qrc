@@ -7,5 +7,8 @@
     <file alias="icons/hotkeys.svg">assets/icons/hotkeys.svg</file>
     <file alias="icons/advanced.svg">assets/icons/advanced.svg</file>
     <file alias="icons/settings.svg">assets/icons/settings.svg</file>
+    <file alias="icons/donate-heart.svg">assets/icons/donate-heart.svg</file>
+    <file alias="icons/checkmark.svg">assets/icons/checkmark.svg</file>
+    <file alias="icons/about.svg">assets/icons/about.svg</file>
   </qresource>
 </RCC>
