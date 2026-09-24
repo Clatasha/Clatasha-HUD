@@ -3,6 +3,7 @@
 #endif
 
 #include <windows.h>
+#include <tlhelp32.h>
 #include <evntrace.h>
 #include <evntcons.h>
 
@@ -190,9 +191,83 @@ bool StartEtw(const std::wstring &sessionName)
     return true;
 }
 
+std::string RendererTagForProcess(DWORD pid)
+{
+    if (pid == 0)
+        return {};
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(
+        TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
+        pid);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return {};
+
+    bool hasVulkan = false;
+    bool hasOpenGl = false;
+    bool hasD3d12 = false;
+    bool hasD3d11 = false;
+    bool hasD3d10 = false;
+    bool hasD3d9 = false;
+    bool hasDdraw = false;
+
+    MODULEENTRY32W module{};
+    module.dwSize = sizeof(module);
+
+    if (Module32FirstW(snapshot, &module)) {
+        do {
+            const wchar_t *name = module.szModule;
+            if (_wcsicmp(name, L"vulkan-1.dll") == 0)
+                hasVulkan = true;
+            else if (_wcsicmp(name, L"opengl32.dll") == 0)
+                hasOpenGl = true;
+            else if (_wcsicmp(name, L"d3d12.dll") == 0)
+                hasD3d12 = true;
+            else if (_wcsicmp(name, L"d3d11.dll") == 0)
+                hasD3d11 = true;
+            else if (_wcsicmp(name, L"d3d10.dll") == 0 ||
+                     _wcsicmp(name, L"d3d10_1.dll") == 0)
+                hasD3d10 = true;
+            else if (_wcsicmp(name, L"d3d9.dll") == 0)
+                hasD3d9 = true;
+            else if (_wcsicmp(name, L"ddraw.dll") == 0)
+                hasDdraw = true;
+        } while (Module32NextW(snapshot, &module));
+    }
+
+    CloseHandle(snapshot);
+
+    // Prefer explicit graphics-runtime modules over shared DXGI/kernel pieces.
+    // This is renderer detection only; presentation-hook confirmation comes
+    // later when the API-specific backends are added.
+    if (hasVulkan)
+        return "VK";
+    if (hasOpenGl)
+        return "OGL";
+    if (hasD3d12)
+        return "D12";
+    if (hasD3d11)
+        return "D11";
+    if (hasD3d10)
+        return "D10";
+    if (hasD3d9)
+        return "D9";
+    if (hasDdraw)
+        return "DD";
+
+    return {};
+}
+
 void WriteStateFile(const std::wstring &path)
 {
     const ULONGLONG now = GetTickCount64();
+
+    DWORD foregroundPid = 0;
+    if (const HWND foreground = GetForegroundWindow())
+        GetWindowThreadProcessId(foreground, &foregroundPid);
+
+    const std::string foregroundRenderer =
+        RendererTagForProcess(foregroundPid);
+    bool foregroundWritten = false;
     std::map<DWORD, std::array<std::uint64_t, kPresentStreamCount>> counts;
 
     {
@@ -247,8 +322,32 @@ void WriteStateFile(const std::wstring &path)
                 bestFps = fps;
         }
 
-        if (bestFps > 0.0)
-            std::fprintf(fp, "%lu,%.3f\n", pid, bestFps);
+        if (bestFps > 0.0) {
+            if (pid == foregroundPid && !foregroundRenderer.empty()) {
+                std::fprintf(
+                    fp,
+                    "%lu,%.3f,%s\n",
+                    pid,
+                    bestFps,
+                    foregroundRenderer.c_str());
+                foregroundWritten = true;
+            } else {
+                std::fprintf(fp, "%lu,%.3f\n", pid, bestFps);
+            }
+        }
+    }
+
+    // API detection is useful even when ETW cannot calculate FPS yet. This is
+    // the expected first-stage behavior for OpenGL while its present hook is
+    // still under development.
+    if (foregroundPid != 0 &&
+        !foregroundRenderer.empty() &&
+        !foregroundWritten) {
+        std::fprintf(
+            fp,
+            "%lu,0.000,%s\n",
+            foregroundPid,
+            foregroundRenderer.c_str());
     }
 
     std::fclose(fp);

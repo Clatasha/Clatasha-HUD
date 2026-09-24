@@ -323,6 +323,10 @@ void ClatashaHudWindow::updateForegroundGame()
 
     trackedGamePid_ = newPid;
     resetGameFps();
+    if (!gameRenderer_.isEmpty()) {
+        gameRenderer_.clear();
+        update();
+    }
 
     wchar_t imagePath[MAX_PATH] = {};
     QString processName;
@@ -383,7 +387,9 @@ void ClatashaHudWindow::readFpsState()
     }
 
     bool found = false;
+    bool targetRowFound = false;
     double fps = 0.0;
+    QString renderer;
 
     while (!file.atEnd()) {
         const QByteArray line = file.readLine().trimmed();
@@ -391,7 +397,7 @@ void ClatashaHudWindow::readFpsState()
             continue;
 
         const QList<QByteArray> fields = line.split(',');
-        if (fields.size() != 2)
+        if (fields.size() < 2)
             continue;
 
         bool pidOk = false;
@@ -399,12 +405,31 @@ void ClatashaHudWindow::readFpsState()
         const quint32 pid = fields.at(0).toUInt(&pidOk);
         const double value = fields.at(1).toDouble(&fpsOk);
 
-        if (pidOk && fpsOk && pid == trackedGamePid_ &&
-            std::isfinite(value) && value > 0.0 && value < 2000.0) {
+        if (!pidOk || pid != trackedGamePid_)
+            continue;
+
+        targetRowFound = true;
+        if (fields.size() >= 3)
+            renderer = QString::fromUtf8(fields.at(2)).trimmed().toUpper();
+
+        if (fpsOk && std::isfinite(value) && value > 0.0 && value < 2000.0) {
             fps = value;
             found = true;
-            break;
         }
+        break;
+    }
+
+    if (!targetRowFound)
+        renderer.clear();
+
+    if (renderer != gameRenderer_) {
+        gameRenderer_ = renderer;
+        blog(LOG_INFO,
+             "[Clatasha HUD] Renderer target PID %u: %s",
+             trackedGamePid_,
+             gameRenderer_.isEmpty()
+                 ? "unknown"
+                 : gameRenderer_.toUtf8().constData());
     }
 
     if (found) {
@@ -727,6 +752,17 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     p.setPen(QColor(165, 171, 176));
     p.setFont(QFont(QStringLiteral("Segoe UI"), 10, QFont::DemiBold));
     p.drawText(QRect(74, 4, 29, 23), Qt::AlignLeft | Qt::AlignVCenter, obsFpsText);
+
+    if (!gameRenderer_.isEmpty()) {
+        const QRectF rendererRect(102.0, 2.0, 23.0, 10.0);
+        p.setPen(QPen(QColor(96, 106, 116, 170), 0.8));
+        p.setBrush(QColor(22, 27, 32, 205));
+        p.drawRoundedRect(rendererRect, 2.0, 2.0);
+
+        p.setPen(QColor(210, 216, 221));
+        p.setFont(QFont(QStringLiteral("Segoe UI"), 6, QFont::Bold));
+        p.drawText(rendererRect, Qt::AlignCenter, gameRenderer_);
+    }
 
     p.setPen(QColor(205, 209, 212));
     p.setFont(QFont(QStringLiteral("Segoe UI"), 8, QFont::Normal));
