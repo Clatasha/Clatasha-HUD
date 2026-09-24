@@ -97,6 +97,7 @@ namespace {
 
 constexpr const char *kClatashaHudVersion = CLATASHA_HUD_VERSION;
 constexpr qint64 kUpdateCheckIntervalSeconds = 24 * 60 * 60;
+constexpr qint64 kUpdateRetryIntervalSeconds = 5 * 60;
 const QUrl kLatestReleaseApiUrl(
     QStringLiteral("https://api.github.com/repos/Clatasha/Clatasha-HUD/releases/latest"));
 const QUrl kLatestReleaseFallbackUrl(
@@ -107,6 +108,7 @@ struct UpdateCheckState {
     bool checkedSuccessfully = false;
     bool updateAvailable = false;
     qint64 lastAttemptEpoch = 0;
+    qint64 lastSuccessfulCheckEpoch = 0;
     QString latestVersion;
     QUrl releaseUrl;
 };
@@ -804,9 +806,10 @@ void saveCachedUpdateCheck()
         return;
 
     QSettings settings(path, QSettings::IniFormat);
+    settings.remove(QStringLiteral("update/lastAttemptEpoch"));
     settings.setValue(
-        QStringLiteral("update/lastAttemptEpoch"),
-        g_updateCheck.lastAttemptEpoch);
+        QStringLiteral("update/lastSuccessfulCheckEpoch"),
+        g_updateCheck.lastSuccessfulCheckEpoch);
     settings.setValue(
         QStringLiteral("update/latestVersion"),
         g_updateCheck.latestVersion);
@@ -821,12 +824,24 @@ void saveCachedUpdateCheck()
 
 bool updateCheckCacheIsFresh()
 {
+    if (!g_updateCheck.checkedSuccessfully ||
+        g_updateCheck.lastSuccessfulCheckEpoch <= 0) {
+        return false;
+    }
+
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    const qint64 age = now - g_updateCheck.lastSuccessfulCheckEpoch;
+    return age >= 0 && age < kUpdateCheckIntervalSeconds;
+}
+
+bool updateRetryIsThrottled()
+{
     if (g_updateCheck.lastAttemptEpoch <= 0)
         return false;
 
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     const qint64 age = now - g_updateCheck.lastAttemptEpoch;
-    return age >= 0 && age < kUpdateCheckIntervalSeconds;
+    return age >= 0 && age < kUpdateRetryIntervalSeconds;
 }
 
 void checkForClatashaHudUpdate(bool force = false)
@@ -839,12 +854,16 @@ void checkForClatashaHudUpdate(bool force = false)
         return;
     }
 
+    if (!force && updateRetryIsThrottled()) {
+        refreshSettingsUpdateUi();
+        return;
+    }
+
     if (!g_updateNetworkManager)
         g_updateNetworkManager = new QNetworkAccessManager();
 
     g_updateCheck.requestInFlight = true;
     g_updateCheck.lastAttemptEpoch = QDateTime::currentSecsSinceEpoch();
-    saveCachedUpdateCheck();
 
     QNetworkRequest request(kLatestReleaseApiUrl);
     request.setRawHeader("Accept", "application/vnd.github+json");
@@ -869,7 +888,6 @@ void checkForClatashaHudUpdate(bool force = false)
             blog(LOG_DEBUG,
                  "[Clatasha HUD] Update check unavailable: %s",
                  reply->errorString().toUtf8().constData());
-            saveCachedUpdateCheck();
             refreshSettingsUpdateUi();
             reply->deleteLater();
             return;
@@ -887,13 +905,14 @@ void checkForClatashaHudUpdate(bool force = false)
             !document.isObject() || tagName.trimmed().isEmpty()) {
             blog(LOG_DEBUG,
                  "[Clatasha HUD] Update check returned an unreadable release response");
-            saveCachedUpdateCheck();
             refreshSettingsUpdateUi();
             reply->deleteLater();
             return;
         }
 
         g_updateCheck.checkedSuccessfully = true;
+        g_updateCheck.lastSuccessfulCheckEpoch =
+            QDateTime::currentSecsSinceEpoch();
         g_updateCheck.latestVersion = tagName.trimmed();
         g_updateCheck.releaseUrl =
             releaseUrl.isValid() ? releaseUrl : kLatestReleaseFallbackUrl;
