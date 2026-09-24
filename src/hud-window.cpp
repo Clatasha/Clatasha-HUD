@@ -278,26 +278,40 @@ void ClatashaHudWindow::startFpsHelper()
             .arg(QDir::toNativeSeparators(statePath))
             .arg(GetCurrentProcessId());
 
-    const std::wstring helperWide = QDir::toNativeSeparators(helperPath).toStdWString();
-    const std::wstring paramsWide = parameters.toStdWString();
+    const QString commandLine =
+        QStringLiteral("\"%1\" %2")
+            .arg(QDir::toNativeSeparators(helperPath), parameters);
+    std::wstring commandLineWide = commandLine.toStdWString();
 
-    SHELLEXECUTEINFOW info = {};
-    info.cbSize = sizeof(info);
-    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
-    info.lpVerb = L"runas";
-    info.lpFile = helperWide.c_str();
-    info.lpParameters = paramsWide.c_str();
-    info.nShow = SW_HIDE;
+    STARTUPINFOW startupInfo{};
+    startupInfo.cb = sizeof(startupInfo);
+    startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+    startupInfo.wShowWindow = SW_HIDE;
 
-    if (!ShellExecuteExW(&info)) {
-        blog(LOG_WARNING, "[Clatasha HUD] FPS helper launch failed: %lu", GetLastError());
+    PROCESS_INFORMATION processInfo{};
+    if (!CreateProcessW(
+            nullptr,
+            commandLineWide.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            nullptr,
+            &startupInfo,
+            &processInfo)) {
+        blog(LOG_WARNING,
+             "[Clatasha HUD] FPS helper launch without elevation failed: %lu",
+             GetLastError());
         return;
     }
 
-    fpsHelperHandle_ = reinterpret_cast<quintptr>(info.hProcess);
+    CloseHandle(processInfo.hThread);
+    fpsHelperHandle_ = reinterpret_cast<quintptr>(processInfo.hProcess);
     fpsHelperStarted_ = true;
     lastFpsStateMtimeMs_ = 0;
-    blog(LOG_INFO, "[Clatasha HUD] Direct ETW FPS helper started");
+    blog(LOG_INFO,
+         "[Clatasha HUD] Direct ETW FPS helper started without elevation");
 #endif
 }
 
