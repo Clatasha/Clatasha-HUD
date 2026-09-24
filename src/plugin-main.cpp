@@ -32,8 +32,16 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QObject>
 #include <QPainter>
+#include <QPointer>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QDateTime>
+#include <QVersionNumber>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScreen>
@@ -82,6 +90,31 @@ static bool g_frontendExiting = false;
 static bool g_browserHudOverlaysWantedVisible = true;
 
 namespace {
+
+#ifndef CLATASHA_HUD_VERSION
+#define CLATASHA_HUD_VERSION "0.0.0"
+#endif
+
+constexpr const char *kClatashaHudVersion = CLATASHA_HUD_VERSION;
+constexpr qint64 kUpdateCheckIntervalSeconds = 24 * 60 * 60;
+const QUrl kLatestReleaseApiUrl(
+    QStringLiteral("https://api.github.com/repos/Clatasha/Clatasha-HUD/releases/latest"));
+const QUrl kLatestReleaseFallbackUrl(
+    QStringLiteral("https://github.com/Clatasha/Clatasha-HUD/releases/latest"));
+
+struct UpdateCheckState {
+    bool requestInFlight = false;
+    bool checkedSuccessfully = false;
+    bool updateAvailable = false;
+    qint64 lastAttemptEpoch = 0;
+    QString latestVersion;
+    QUrl releaseUrl;
+};
+
+UpdateCheckState g_updateCheck;
+QNetworkAccessManager *g_updateNetworkManager = nullptr;
+QPointer<QLabel> g_settingsVersionLabel;
+QPointer<QPushButton> g_settingsUpdateButton;
 
 constexpr int kOverlayCount = 5;
 constexpr int kCanvasWidth = 1920;
@@ -690,6 +723,193 @@ QString settingsFilePath()
     const QString result = QString::fromUtf8(path);
     bfree(path);
     return result;
+}
+
+QString currentHudVersion()
+{
+    return QString::fromLatin1(kClatashaHudVersion);
+}
+
+QVersionNumber parsedVersion(QString value)
+{
+    value = value.trimmed();
+    if (value.startsWith(QLatin1Char('v'), Qt::CaseInsensitive))
+        value.remove(0, 1);
+
+    qsizetype suffixIndex = 0;
+    return QVersionNumber::fromString(value, &suffixIndex);
+}
+
+bool isReleaseNewerThanInstalled(const QString &latest)
+{
+    const QVersionNumber latestVersion = parsedVersion(latest);
+    const QVersionNumber installedVersion = parsedVersion(currentHudVersion());
+    if (latestVersion.isNull() || installedVersion.isNull())
+        return false;
+
+    return QVersionNumber::compare(latestVersion, installedVersion) > 0;
+}
+
+void refreshSettingsUpdateUi()
+{
+    if (g_settingsVersionLabel) {
+        QString label = QStringLiteral("v%1").arg(currentHudVersion());
+        if (g_updateCheck.checkedSuccessfully && !g_updateCheck.updateAvailable)
+            label += QStringLiteral("  ✓");
+        g_settingsVersionLabel->setText(label);
+    }
+
+    if (!g_settingsUpdateButton)
+        return;
+
+    g_settingsUpdateButton->setVisible(g_updateCheck.updateAvailable);
+    if (!g_updateCheck.updateAvailable)
+        return;
+
+    const QString latest = g_updateCheck.latestVersion.trimmed();
+    g_settingsUpdateButton->setText(QStringLiteral("●  Update available"));
+    g_settingsUpdateButton->setToolTip(
+        latest.isEmpty()
+            ? QStringLiteral("A newer Clatasha HUD release is available.")
+            : QStringLiteral("Clatasha HUD %1 is available. Click to open the release page.")
+                  .arg(latest.startsWith(QLatin1Char('v'), Qt::CaseInsensitive)
+                           ? latest
+                           : QStringLiteral("v%1").arg(latest)));
+}
+
+void loadCachedUpdateCheck()
+{
+    const QString path = settingsFilePath();
+    if (path.isEmpty())
+        return;
+
+    QSettings settings(path, QSettings::IniFormat);
+    g_updateCheck.lastAttemptEpoch =
+        settings.value(QStringLiteral("update/lastAttemptEpoch"), 0).toLongLong();
+    g_updateCheck.latestVersion =
+        settings.value(QStringLiteral("update/latestVersion")).toString();
+    g_updateCheck.releaseUrl = QUrl(
+        settings.value(QStringLiteral("update/releaseUrl")).toString());
+    g_updateCheck.checkedSuccessfully =
+        settings.value(QStringLiteral("update/checkedSuccessfully"), false).toBool();
+    g_updateCheck.updateAvailable =
+        g_updateCheck.checkedSuccessfully &&
+        isReleaseNewerThanInstalled(g_updateCheck.latestVersion);
+}
+
+void saveCachedUpdateCheck()
+{
+    const QString path = settingsFilePath();
+    if (path.isEmpty())
+        return;
+
+    QSettings settings(path, QSettings::IniFormat);
+    settings.setValue(
+        QStringLiteral("update/lastAttemptEpoch"),
+        g_updateCheck.lastAttemptEpoch);
+    settings.setValue(
+        QStringLiteral("update/latestVersion"),
+        g_updateCheck.latestVersion);
+    settings.setValue(
+        QStringLiteral("update/releaseUrl"),
+        g_updateCheck.releaseUrl.toString());
+    settings.setValue(
+        QStringLiteral("update/checkedSuccessfully"),
+        g_updateCheck.checkedSuccessfully);
+    settings.sync();
+}
+
+bool updateCheckCacheIsFresh()
+{
+    if (g_updateCheck.lastAttemptEpoch <= 0)
+        return false;
+
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    const qint64 age = now - g_updateCheck.lastAttemptEpoch;
+    return age >= 0 && age < kUpdateCheckIntervalSeconds;
+}
+
+void checkForClatashaHudUpdate(bool force = false)
+{
+    if (g_frontendExiting || g_updateCheck.requestInFlight)
+        return;
+
+    if (!force && updateCheckCacheIsFresh()) {
+        refreshSettingsUpdateUi();
+        return;
+    }
+
+    if (!g_updateNetworkManager)
+        g_updateNetworkManager = new QNetworkAccessManager();
+
+    g_updateCheck.requestInFlight = true;
+    g_updateCheck.lastAttemptEpoch = QDateTime::currentSecsSinceEpoch();
+    saveCachedUpdateCheck();
+
+    QNetworkRequest request(kLatestReleaseApiUrl);
+    request.setRawHeader("Accept", "application/vnd.github+json");
+    request.setRawHeader("X-GitHub-Api-Version", "2022-11-28");
+    request.setRawHeader(
+        "User-Agent",
+        QByteArray("Clatasha-HUD/") + currentHudVersion().toUtf8());
+    request.setAttribute(
+        QNetworkRequest::RedirectPolicyAttribute,
+        QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    QNetworkReply *reply = g_updateNetworkManager->get(request);
+    QObject::connect(reply, &QNetworkReply::finished, [reply]() {
+        g_updateCheck.requestInFlight = false;
+
+        if (g_frontendExiting) {
+            reply->deleteLater();
+            return;
+        }
+
+        if (reply->error() != QNetworkReply::NoError) {
+            blog(LOG_DEBUG,
+                 "[Clatasha HUD] Update check unavailable: %s",
+                 reply->errorString().toUtf8().constData());
+            saveCachedUpdateCheck();
+            refreshSettingsUpdateUi();
+            reply->deleteLater();
+            return;
+        }
+
+        QJsonParseError parseError{};
+        const QJsonDocument document =
+            QJsonDocument::fromJson(reply->readAll(), &parseError);
+        const QJsonObject object = document.object();
+        const QString tagName = object.value(QStringLiteral("tag_name")).toString();
+        const QUrl releaseUrl(
+            object.value(QStringLiteral("html_url")).toString());
+
+        if (parseError.error != QJsonParseError::NoError ||
+            !document.isObject() || tagName.trimmed().isEmpty()) {
+            blog(LOG_DEBUG,
+                 "[Clatasha HUD] Update check returned an unreadable release response");
+            saveCachedUpdateCheck();
+            refreshSettingsUpdateUi();
+            reply->deleteLater();
+            return;
+        }
+
+        g_updateCheck.checkedSuccessfully = true;
+        g_updateCheck.latestVersion = tagName.trimmed();
+        g_updateCheck.releaseUrl =
+            releaseUrl.isValid() ? releaseUrl : kLatestReleaseFallbackUrl;
+        g_updateCheck.updateAvailable =
+            isReleaseNewerThanInstalled(g_updateCheck.latestVersion);
+
+        blog(LOG_INFO,
+             "[Clatasha HUD] Update check: installed v%s, latest %s%s",
+             kClatashaHudVersion,
+             g_updateCheck.latestVersion.toUtf8().constData(),
+             g_updateCheck.updateAvailable ? " (update available)" : "");
+
+        saveCachedUpdateCheck();
+        refreshSettingsUpdateUi();
+        reply->deleteLater();
+    });
 }
 
 #ifdef Q_OS_WIN
@@ -2961,10 +3181,11 @@ static void show_settings()
         QStringLiteral("About"),
         QStringLiteral("Clatasha HUD"),
         QStringLiteral(
-            "<b>Clatasha HUD v0.2.0</b><br>"
+            "<b>Clatasha HUD v%1</b><br>"
             "Stream Smarter. Create More.<br><br>"
             "<a href='https://github.com/Clatasha/Clatasha-HUD'>GitHub project</a><br><br>"
-            "Built as part of the Clatasha creator-tool ecosystem."));
+            "Built as part of the Clatasha creator-tool ecosystem.")
+            .arg(currentHudVersion()));
 
     const int generalPageIndex = pages->addWidget(generalPage);
     const int appearancePageIndex = pages->addWidget(appearancePage);
@@ -3009,8 +3230,17 @@ static void show_settings()
     brandTextLayout->addWidget(brandSlogan);
     brandTextLayout->addStretch();
 
-    auto *versionLabel = new QLabel(QStringLiteral("v0.2.0"), header);
+    auto *versionLabel =
+        new QLabel(QStringLiteral("v%1").arg(currentHudVersion()), header);
     versionLabel->setObjectName(QStringLiteral("versionLabel"));
+    g_settingsVersionLabel = versionLabel;
+
+    auto *updateButton =
+        new QPushButton(QStringLiteral("●  Update available"), header);
+    updateButton->setObjectName(QStringLiteral("updateButton"));
+    updateButton->setCursor(Qt::PointingHandCursor);
+    updateButton->hide();
+    g_settingsUpdateButton = updateButton;
 
     auto *donateButton = new QPushButton(QStringLiteral("♥  Donate"), header);
     donateButton->setObjectName(QStringLiteral("donateButton"));
@@ -3021,7 +3251,24 @@ static void show_settings()
     headerLayout->addStretch();
     headerLayout->addWidget(versionLabel);
     headerLayout->addSpacing(6);
+    headerLayout->addWidget(updateButton);
+    headerLayout->addSpacing(6);
     headerLayout->addWidget(donateButton);
+
+    QObject::connect(updateButton, &QPushButton::clicked, &dialog, []() {
+        QDesktopServices::openUrl(
+            g_updateCheck.releaseUrl.isValid()
+                ? g_updateCheck.releaseUrl
+                : kLatestReleaseFallbackUrl);
+    });
+
+    QObject::connect(&dialog, &QObject::destroyed, []() {
+        g_settingsVersionLabel.clear();
+        g_settingsUpdateButton.clear();
+    });
+
+    refreshSettingsUpdateUi();
+    checkForClatashaHudUpdate();
 
     QObject::connect(donateButton, &QPushButton::clicked, &dialog, [&]() {
         QDialog donateDialog(&dialog);
@@ -3375,6 +3622,9 @@ static void show_settings()
         "QFrame#settingsHeader { background:#0d141c; border-bottom:1px solid #26313d; }"
         "QLabel#brandSlogan { color:#5f9ed7; font-size:8.5pt; }"
         "QLabel#versionLabel { color:#81909d; font-size:8.5pt; }"
+        "QPushButton#updateButton { background:#3a2d12; color:#ffd98a;"
+        " border:1px solid #7b5d1c; border-radius:7px; padding:5px 9px; font-size:8.5pt; font-weight:600; }"
+        "QPushButton#updateButton:hover { background:#4a3916; border-color:#a17a24; }"
         "QPushButton#donateButton { background:#16283a; color:#9dd1ff;"
         " border:1px solid #2b5b82; border-radius:7px; padding:7px 14px; font-weight:600; }"
         "QPushButton#donateButton:hover { background:#1b3550; border-color:#3e79a8; }"
@@ -3425,6 +3675,10 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
         ensure_hud();
         g_hud->show();
         g_hud->positionHud();
+        QTimer::singleShot(5000, []() {
+            if (!g_frontendExiting)
+                checkForClatashaHudUpdate();
+        });
         {
             const auto configs = loadOverlayConfigs();
             applyVideoOverlays(configs);
@@ -3440,6 +3694,11 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
     case OBS_FRONTEND_EVENT_EXIT:
         restoreGameBorderlessWindow();
         g_frontendExiting = true;
+        if (g_updateNetworkManager) {
+            delete g_updateNetworkManager;
+            g_updateNetworkManager = nullptr;
+            g_updateCheck.requestInFlight = false;
+        }
         g_hudWantedVisible = false;
         destroyHudOverlays();
         if (g_hud) {
@@ -3461,6 +3720,7 @@ bool obs_module_load(void)
 
     g_frontendExiting = false;
     loadGameWindowSettings();
+    loadCachedUpdateCheck();
     obs_frontend_add_event_callback(on_frontend_event, nullptr);
     registerHudHotkeys();
 
@@ -3481,6 +3741,14 @@ void obs_module_unload(void)
 {
     restoreGameBorderlessWindow();
     g_hudWantedVisible = false;
+    g_frontendExiting = true;
+
+    if (g_updateNetworkManager) {
+        delete g_updateNetworkManager;
+        g_updateNetworkManager = nullptr;
+        g_updateCheck.requestInFlight = false;
+    }
+
     unregisterHudHotkeys();
     if (!g_frontendExiting)
         obs_frontend_remove_event_callback(on_frontend_event, nullptr);
