@@ -1,0 +1,105 @@
+name: Publish Clatasha HUD v0.2.1
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-v0.2.1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout v0.2.1 source
+        uses: actions/checkout@v4
+        with:
+          ref: 9d2ebac25e4f77543c9ba9b4db74196325b60ca7
+
+      - name: Configure
+        run: cmake --preset windows-x64
+
+      - name: Build
+        run: cmake --build --preset windows-x64
+
+      - name: Install staging files
+        run: cmake --install build_x64 --config RelWithDebInfo --prefix package
+
+      - name: Create OBS installation package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $pluginRoot = "package/clatasha-hud"
+          $dist = "dist"
+
+          New-Item -ItemType Directory -Force "$dist/obs-plugins/64bit" | Out-Null
+          New-Item -ItemType Directory -Force "$dist/data/obs-plugins/clatasha-hud/locale" | Out-Null
+
+          Copy-Item "$pluginRoot/bin/64bit/clatasha-hud.dll" "$dist/obs-plugins/64bit/clatasha-hud.dll"
+          Copy-Item "$pluginRoot/data/clatasha-fps-helper.exe" "$dist/data/obs-plugins/clatasha-hud/clatasha-fps-helper.exe"
+          Copy-Item "$pluginRoot/data/locale/en-US.ini" "$dist/data/obs-plugins/clatasha-hud/locale/en-US.ini"
+
+          Compress-Archive -Path "$dist/*" -DestinationPath "Clatasha-HUD-OBS-0.2.1-Windows-x64.zip" -Force
+
+      - name: Write release notes
+        shell: pwsh
+        run: |
+          @'
+          ## Clatasha HUD 0.2.1
+
+          This release focuses on update awareness, Windows compatibility, and settings UI polish while keeping the FPS behavior verified in testing.
+
+          ### New in 0.2.1
+          - Added a built-in GitHub release check for newer Clatasha HUD versions.
+          - Added a current-version status indicator beside the installed version.
+          - Added a clickable Update available indicator that opens the latest GitHub release page.
+          - Update checks are cached so GitHub is not queried repeatedly.
+          - Switched update checks from Qt networking to native Windows WinHTTP for reliable HTTPS support inside OBS.
+          - Centralized the displayed version so Settings, About, update checks, and build metadata stay in sync.
+          - Added custom SVG icons for Donate, About, current-version status, and the Changes applied toast.
+          - Improved failed update-check retry behavior and cache handling.
+
+          ### FPS
+          - Kept the elevated ETW FPS helper after testing confirmed that the broader ETW session requires elevation on the tested Windows setup.
+          - Preserves the expanded DXGI, D3D9, and DxgKrnl presentation coverage introduced in 0.2.0.
+          - Keeps automatic helper recovery if the FPS helper exits unexpectedly.
+
+          ### Included from 0.2.0
+          - Per-overlay opacity controls.
+          - Stronger HUD/browser-overlay topmost recovery.
+          - Force Borderless Fullscreen with reversible game-window restoration.
+          - Temporary Windows taskbar Auto-hide while forced-borderless mode is active.
+          - Borderless fullscreen hotkey support.
+          - Compact private HUD with game FPS, OBS FPS, timer, disk space, audio meters, and replay-buffer indicator.
+
+          ### Requirements
+          - Windows 10 or Windows 11 x64
+          - OBS Studio with Browser Source/obs-browser installed and enabled
+          - Current development/testing is on OBS Studio 32.2.2
+
+          ### Installation
+          1. Close OBS Studio.
+          2. Extract **Clatasha-HUD-OBS-0.2.1-Windows-x64.zip** directly into the OBS installation directory, normally `C:\Program Files\obs-studio`.
+          3. Replace existing Clatasha HUD files when prompted.
+          4. Restart OBS Studio.
+          5. Open Clatasha HUD from the **Tools** menu.
+
+          The FPS helper requests elevation because the ETW capture path used for broad FPS detection requires administrator access on the tested system.
+          '@ | Set-Content -Path "release-notes.md" -Encoding UTF8
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v0.2.1" "Clatasha-HUD-OBS-0.2.1-Windows-x64.zip#Windows x64 OBS installation package" `
+            --repo "${{ github.repository }}" `
+            --target "9d2ebac25e4f77543c9ba9b4db74196325b60ca7" `
+            --title "Clatasha HUD - OBS Status Overlay 0.2.1" `
+            --notes-file "release-notes.md"
