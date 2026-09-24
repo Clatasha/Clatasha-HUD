@@ -6,6 +6,7 @@
 #include <detours.h>
 
 #include <cstdint>
+#include <cwchar>
 
 namespace {
 
@@ -105,8 +106,9 @@ BOOL WINAPI HookedWglSwapLayerBuffers(HDC dc, UINT planes)
 bool CreateSharedState()
 {
     wchar_t name[96] = {};
-    swprintf_s(
+    std::swprintf(
         name,
+        sizeof(name) / sizeof(name[0]),
         L"Local\\ClatashaHUD_OGL_%lu",
         GetCurrentProcessId());
 
