@@ -50,25 +50,16 @@ if(WIN32)
   target_link_libraries(clatasha-fps-helper PRIVATE advapi32)
   install(TARGETS clatasha-fps-helper RUNTIME DESTINATION "${CMAKE_PROJECT_NAME}/data")
 
-  # OBS already resolves Detours from obs-deps while configuring its
-  # Windows capture hook. Reuse those cached paths here rather than calling
-  # find_package() again outside OBS's private finder scope.
-  if(NOT Detours_INCLUDE_DIR OR NOT Detours_IMPLIB)
-    message(FATAL_ERROR "OBS Detours dependency paths are unavailable")
-  endif()
+  find_package(Detours REQUIRED)
 
   add_library(clatasha-opengl-present-hook SHARED src/opengl-present-hook.cpp)
   target_compile_definitions(
     clatasha-opengl-present-hook
     PRIVATE UNICODE _UNICODE NOMINMAX
   )
-  target_include_directories(
-    clatasha-opengl-present-hook
-    PRIVATE "${Detours_INCLUDE_DIR}"
-  )
   target_link_libraries(
     clatasha-opengl-present-hook
-    PRIVATE "${Detours_IMPLIB}"
+    PRIVATE Detours::Detours
   )
   set_target_properties(
     clatasha-opengl-present-hook
