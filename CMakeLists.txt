@@ -19,8 +19,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
 find_package(obs-frontend-api REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Core Network)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets Qt6::Network)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Core)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CLATASHA_HUD_VERSION="${PROJECT_VERSION}")
 
 set_target_properties(
@@ -43,7 +43,7 @@ target_sources(
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 
 if(WIN32)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE shell32)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE shell32 winhttp)
 
   add_executable(clatasha-fps-helper src/fps-helper.cpp)
   target_compile_definitions(clatasha-fps-helper PRIVATE UNICODE _UNICODE NOMINMAX)

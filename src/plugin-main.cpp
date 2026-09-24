@@ -32,9 +32,6 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QMouseEvent>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
 #include <QObject>
 #include <QPainter>
 #include <QPointer>
@@ -64,12 +61,14 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <winhttp.h>
 #include <shellapi.h>
 #ifndef WDA_EXCLUDEFROMCAPTURE
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
@@ -114,7 +113,10 @@ struct UpdateCheckState {
 };
 
 UpdateCheckState g_updateCheck;
-QNetworkAccessManager *g_updateNetworkManager = nullptr;
+#ifdef Q_OS_WIN
+std::thread g_updateWorker;
+QObject *g_updateCallbackContext = nullptr;
+#endif
 QPointer<QLabel> g_settingsVersionLabel;
 QPointer<QPushButton> g_settingsUpdateButton;
 
@@ -786,14 +788,27 @@ void loadCachedUpdateCheck()
         return;
 
     QSettings settings(path, QSettings::IniFormat);
-    g_updateCheck.lastAttemptEpoch =
-        settings.value(QStringLiteral("update/lastAttemptEpoch"), 0).toLongLong();
+
+    // A failed request from an older OBS session must never suppress the next
+    // startup check. Only a successful release lookup is persisted for 24 h.
+    g_updateCheck.lastAttemptEpoch = 0;
+    g_updateCheck.checkedSuccessfully =
+        settings.value(QStringLiteral("update/checkedSuccessfully"), false).toBool();
+    g_updateCheck.lastSuccessfulCheckEpoch =
+        settings.value(QStringLiteral("update/lastSuccessfulCheckEpoch"), 0).toLongLong();
+
+    // Migration from the first updater build, which stored its timestamp under
+    // lastAttemptEpoch even when it had successfully completed.
+    if (g_updateCheck.lastSuccessfulCheckEpoch <= 0 &&
+        g_updateCheck.checkedSuccessfully) {
+        g_updateCheck.lastSuccessfulCheckEpoch =
+            settings.value(QStringLiteral("update/lastAttemptEpoch"), 0).toLongLong();
+    }
+
     g_updateCheck.latestVersion =
         settings.value(QStringLiteral("update/latestVersion")).toString();
     g_updateCheck.releaseUrl = QUrl(
         settings.value(QStringLiteral("update/releaseUrl")).toString());
-    g_updateCheck.checkedSuccessfully =
-        settings.value(QStringLiteral("update/checkedSuccessfully"), false).toBool();
     g_updateCheck.updateAvailable =
         g_updateCheck.checkedSuccessfully &&
         isReleaseNewerThanInstalled(g_updateCheck.latestVersion);
@@ -844,6 +859,154 @@ bool updateRetryIsThrottled()
     return age >= 0 && age < kUpdateRetryIntervalSeconds;
 }
 
+#ifdef Q_OS_WIN
+struct WinHttpUpdateResult {
+    bool ok = false;
+    DWORD errorCode = ERROR_SUCCESS;
+    DWORD httpStatus = 0;
+    QByteArray body;
+};
+
+WinHttpUpdateResult fetchLatestReleaseWithWinHttp()
+{
+    WinHttpUpdateResult result;
+
+    const std::wstring userAgent =
+        QStringLiteral("Clatasha-HUD/%1").arg(currentHudVersion()).toStdWString();
+
+    HINTERNET session = WinHttpOpen(
+        userAgent.c_str(),
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS,
+        0);
+    if (!session) {
+        result.errorCode = GetLastError();
+        return result;
+    }
+
+    HINTERNET connection = nullptr;
+    HINTERNET request = nullptr;
+    auto cleanup = [&]() {
+        if (request)
+            WinHttpCloseHandle(request);
+        if (connection)
+            WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+    };
+
+    // Keep the updater invisible to the OBS UI even if the network is down.
+    WinHttpSetTimeouts(session, 3000, 3000, 5000, 5000);
+
+    connection = WinHttpConnect(
+        session,
+        L"api.github.com",
+        INTERNET_DEFAULT_HTTPS_PORT,
+        0);
+    if (!connection) {
+        result.errorCode = GetLastError();
+        cleanup();
+        return result;
+    }
+
+    request = WinHttpOpenRequest(
+        connection,
+        L"GET",
+        L"/repos/Clatasha/Clatasha-HUD/releases/latest",
+        nullptr,
+        WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE);
+    if (!request) {
+        result.errorCode = GetLastError();
+        cleanup();
+        return result;
+    }
+
+    const wchar_t *headers =
+        L"Accept: application/vnd.github+json\r\n"
+        L"X-GitHub-Api-Version: 2022-11-28\r\n";
+
+    if (!WinHttpSendRequest(
+            request,
+            headers,
+            static_cast<DWORD>(-1L),
+            WINHTTP_NO_REQUEST_DATA,
+            0,
+            0,
+            0) ||
+        !WinHttpReceiveResponse(request, nullptr)) {
+        result.errorCode = GetLastError();
+        cleanup();
+        return result;
+    }
+
+    DWORD statusSize = sizeof(result.httpStatus);
+    WinHttpQueryHeaders(
+        request,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX,
+        &result.httpStatus,
+        &statusSize,
+        WINHTTP_NO_HEADER_INDEX);
+
+    if (result.httpStatus != 200) {
+        cleanup();
+        return result;
+    }
+
+    constexpr qsizetype kMaxReleaseResponseBytes = 1024 * 1024;
+    std::array<char, 8192> buffer{};
+
+    while (result.body.size() < kMaxReleaseResponseBytes) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request, &available)) {
+            result.errorCode = GetLastError();
+            cleanup();
+            return result;
+        }
+        if (available == 0)
+            break;
+
+        const DWORD toRead =
+            qMin<DWORD>(available, static_cast<DWORD>(buffer.size()));
+        DWORD bytesRead = 0;
+        if (!WinHttpReadData(request, buffer.data(), toRead, &bytesRead)) {
+            result.errorCode = GetLastError();
+            cleanup();
+            return result;
+        }
+        if (bytesRead == 0)
+            break;
+
+        result.body.append(buffer.data(), static_cast<qsizetype>(bytesRead));
+    }
+
+    cleanup();
+
+    if (result.body.isEmpty())
+        return result;
+
+    result.ok = true;
+    return result;
+}
+
+void shutdownUpdateChecker()
+{
+    if (g_updateWorker.joinable())
+        g_updateWorker.join();
+
+    delete g_updateCallbackContext;
+    g_updateCallbackContext = nullptr;
+    g_updateCheck.requestInFlight = false;
+}
+#else
+void shutdownUpdateChecker()
+{
+    g_updateCheck.requestInFlight = false;
+}
+#endif
+
 void checkForClatashaHudUpdate(bool force = false)
 {
     if (g_frontendExiting || g_updateCheck.requestInFlight)
@@ -859,76 +1022,92 @@ void checkForClatashaHudUpdate(bool force = false)
         return;
     }
 
-    if (!g_updateNetworkManager)
-        g_updateNetworkManager = new QNetworkAccessManager();
+#ifndef Q_OS_WIN
+    blog(LOG_INFO,
+         "[Clatasha HUD] Update check skipped: native updater is Windows-only");
+    refreshSettingsUpdateUi();
+    return;
+#else
+    if (g_updateWorker.joinable())
+        g_updateWorker.join();
 
+    if (!g_updateCallbackContext)
+        g_updateCallbackContext = new QObject();
+
+    QObject *callbackContext = g_updateCallbackContext;
     g_updateCheck.requestInFlight = true;
     g_updateCheck.lastAttemptEpoch = QDateTime::currentSecsSinceEpoch();
 
-    QNetworkRequest request(kLatestReleaseApiUrl);
-    request.setRawHeader("Accept", "application/vnd.github+json");
-    request.setRawHeader("X-GitHub-Api-Version", "2022-11-28");
-    request.setRawHeader(
-        "User-Agent",
-        QByteArray("Clatasha-HUD/") + currentHudVersion().toUtf8());
-    request.setAttribute(
-        QNetworkRequest::RedirectPolicyAttribute,
-        QNetworkRequest::NoLessSafeRedirectPolicy);
+    blog(LOG_INFO,
+         "[Clatasha HUD] Checking GitHub Releases for updates using Windows WinHTTP");
 
-    QNetworkReply *reply = g_updateNetworkManager->get(request);
-    QObject::connect(reply, &QNetworkReply::finished, [reply]() {
-        g_updateCheck.requestInFlight = false;
+    g_updateWorker = std::thread([callbackContext]() {
+        WinHttpUpdateResult result = fetchLatestReleaseWithWinHttp();
 
-        if (g_frontendExiting) {
-            reply->deleteLater();
-            return;
-        }
+        QMetaObject::invokeMethod(
+            callbackContext,
+            [result = std::move(result)]() mutable {
+                g_updateCheck.requestInFlight = false;
 
-        if (reply->error() != QNetworkReply::NoError) {
-            blog(LOG_DEBUG,
-                 "[Clatasha HUD] Update check unavailable: %s",
-                 reply->errorString().toUtf8().constData());
-            refreshSettingsUpdateUi();
-            reply->deleteLater();
-            return;
-        }
+                if (g_frontendExiting)
+                    return;
 
-        QJsonParseError parseError{};
-        const QJsonDocument document =
-            QJsonDocument::fromJson(reply->readAll(), &parseError);
-        const QJsonObject object = document.object();
-        const QString tagName = object.value(QStringLiteral("tag_name")).toString();
-        const QUrl releaseUrl(
-            object.value(QStringLiteral("html_url")).toString());
+                if (!result.ok) {
+                    if (result.httpStatus != 0) {
+                        blog(LOG_WARNING,
+                             "[Clatasha HUD] Update check failed: GitHub HTTP %lu",
+                             static_cast<unsigned long>(result.httpStatus));
+                    } else {
+                        blog(LOG_WARNING,
+                             "[Clatasha HUD] Update check failed: WinHTTP error %lu",
+                             static_cast<unsigned long>(result.errorCode));
+                    }
+                    refreshSettingsUpdateUi();
+                    return;
+                }
 
-        if (parseError.error != QJsonParseError::NoError ||
-            !document.isObject() || tagName.trimmed().isEmpty()) {
-            blog(LOG_DEBUG,
-                 "[Clatasha HUD] Update check returned an unreadable release response");
-            refreshSettingsUpdateUi();
-            reply->deleteLater();
-            return;
-        }
+                QJsonParseError parseError{};
+                const QJsonDocument document =
+                    QJsonDocument::fromJson(result.body, &parseError);
+                const QJsonObject object = document.object();
+                const QString tagName =
+                    object.value(QStringLiteral("tag_name")).toString();
+                const QUrl releaseUrl(
+                    object.value(QStringLiteral("html_url")).toString());
 
-        g_updateCheck.checkedSuccessfully = true;
-        g_updateCheck.lastSuccessfulCheckEpoch =
-            QDateTime::currentSecsSinceEpoch();
-        g_updateCheck.latestVersion = tagName.trimmed();
-        g_updateCheck.releaseUrl =
-            releaseUrl.isValid() ? releaseUrl : kLatestReleaseFallbackUrl;
-        g_updateCheck.updateAvailable =
-            isReleaseNewerThanInstalled(g_updateCheck.latestVersion);
+                if (parseError.error != QJsonParseError::NoError ||
+                    !document.isObject() || tagName.trimmed().isEmpty()) {
+                    blog(LOG_WARNING,
+                         "[Clatasha HUD] Update check failed: GitHub release response was unreadable");
+                    refreshSettingsUpdateUi();
+                    return;
+                }
 
-        blog(LOG_INFO,
-             "[Clatasha HUD] Update check: installed v%s, latest %s%s",
-             kClatashaHudVersion,
-             g_updateCheck.latestVersion.toUtf8().constData(),
-             g_updateCheck.updateAvailable ? " (update available)" : "");
+                g_updateCheck.checkedSuccessfully = true;
+                g_updateCheck.lastSuccessfulCheckEpoch =
+                    QDateTime::currentSecsSinceEpoch();
+                g_updateCheck.latestVersion = tagName.trimmed();
+                g_updateCheck.releaseUrl =
+                    releaseUrl.isValid()
+                        ? releaseUrl
+                        : kLatestReleaseFallbackUrl;
+                g_updateCheck.updateAvailable =
+                    isReleaseNewerThanInstalled(g_updateCheck.latestVersion);
 
-        saveCachedUpdateCheck();
-        refreshSettingsUpdateUi();
-        reply->deleteLater();
+                blog(LOG_INFO,
+                     "[Clatasha HUD] Update check succeeded: installed v%s, latest %s%s",
+                     kClatashaHudVersion,
+                     g_updateCheck.latestVersion.toUtf8().constData(),
+                     g_updateCheck.updateAvailable
+                         ? " (update available)"
+                         : " (current)");
+
+                saveCachedUpdateCheck();
+                refreshSettingsUpdateUi();
+            },
+            Qt::QueuedConnection);
     });
+#endif
 }
 
 #ifdef Q_OS_WIN
@@ -3713,11 +3892,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
     case OBS_FRONTEND_EVENT_EXIT:
         restoreGameBorderlessWindow();
         g_frontendExiting = true;
-        if (g_updateNetworkManager) {
-            delete g_updateNetworkManager;
-            g_updateNetworkManager = nullptr;
-            g_updateCheck.requestInFlight = false;
-        }
+        shutdownUpdateChecker();
         g_hudWantedVisible = false;
         destroyHudOverlays();
         if (g_hud) {
@@ -3762,11 +3937,7 @@ void obs_module_unload(void)
     g_hudWantedVisible = false;
     g_frontendExiting = true;
 
-    if (g_updateNetworkManager) {
-        delete g_updateNetworkManager;
-        g_updateNetworkManager = nullptr;
-        g_updateCheck.requestInFlight = false;
-    }
+    shutdownUpdateChecker();
 
     unregisterHudHotkeys();
     if (!g_frontendExiting)
