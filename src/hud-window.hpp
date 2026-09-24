@@ -77,7 +77,9 @@ private:
     obs_source_t *micSource_ = nullptr;
     obs_source_t *openGlProbeSource_ = nullptr;
     bool openGlProbeShowing_ = false;
+    bool openGlProbeActive_ = false;
     bool openGlProbeHooked_ = false;
+    quint32 openGlProbePid_ = 0;
 
     std::atomic<float> desktopLevel_{0.0f};
     std::atomic<float> micLevel_{0.0f};
