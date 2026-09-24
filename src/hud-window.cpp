@@ -135,6 +135,7 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
 
 ClatashaHudWindow::~ClatashaHudWindow()
 {
+    releaseOpenGlGameCaptureProbe();
     stopFpsHelper();
 
     if (desktopMeter_) {
@@ -323,6 +324,7 @@ void ClatashaHudWindow::updateForegroundGame()
 
     trackedGamePid_ = newPid;
     resetGameFps();
+    trackedGameExecutable_.clear();
     detectedGameRenderer_.clear();
     gameRenderer_.clear();
     gameFullscreen_ = false;
@@ -339,12 +341,121 @@ void ClatashaHudWindow::updateForegroundGame()
         CloseHandle(process);
     }
 
+    trackedGameExecutable_ = processName;
+
     if (processName.isEmpty()) {
         blog(LOG_INFO, "[Clatasha HUD] FPS target PID %u", newPid);
     } else {
         blog(LOG_INFO, "[Clatasha HUD] FPS target PID %u (%s)",
              newPid, processName.toUtf8().constData());
     }
+
+    updateOpenGlGameCaptureProbe();
+#endif
+}
+
+void ClatashaHudWindow::releaseOpenGlGameCaptureProbe()
+{
+    if (!openGlProbeSource_)
+        return;
+
+    if (openGlProbeShowing_) {
+        obs_source_dec_showing(openGlProbeSource_);
+        openGlProbeShowing_ = false;
+    }
+
+    obs_source_release(openGlProbeSource_);
+    openGlProbeSource_ = nullptr;
+
+    if (openGlProbeHooked_) {
+        blog(LOG_INFO,
+             "[Clatasha HUD] OBS OpenGL probe released");
+    }
+
+    openGlProbeHooked_ = false;
+}
+
+bool ClatashaHudWindow::queryOpenGlGameCaptureHooked() const
+{
+    if (!openGlProbeSource_)
+        return false;
+
+    proc_handler_t *handler =
+        obs_source_get_proc_handler(openGlProbeSource_);
+    if (!handler)
+        return false;
+
+    calldata_t data = {};
+    calldata_init(&data);
+    const bool called =
+        proc_handler_call(handler, "get_hooked", &data);
+    const bool hooked =
+        called && calldata_bool(&data, "hooked");
+    calldata_free(&data);
+    return hooked;
+}
+
+void ClatashaHudWindow::updateOpenGlGameCaptureProbe()
+{
+#ifdef Q_OS_WIN
+    const bool shouldArm =
+        trackedGamePid_ != 0 &&
+        trackedGameExecutable_.compare(
+            QStringLiteral("Allumeria.exe"),
+            Qt::CaseInsensitive) == 0 &&
+        detectedGameRenderer_ == QStringLiteral("OGL");
+
+    if (!shouldArm) {
+        releaseOpenGlGameCaptureProbe();
+        return;
+    }
+
+    if (!openGlProbeSource_) {
+        obs_data_t *settings = obs_data_create();
+
+        obs_data_set_string(settings, "capture_mode", "window");
+        obs_data_set_string(settings, "window", "::Allumeria.exe");
+        obs_data_set_int(settings, "priority", 2);
+        obs_data_set_bool(settings, "capture_cursor", false);
+        obs_data_set_bool(settings, "allow_transparency", false);
+        obs_data_set_bool(settings, "premultiplied_alpha", false);
+        obs_data_set_bool(settings, "limit_framerate", false);
+        obs_data_set_bool(settings, "capture_overlays", false);
+        obs_data_set_bool(settings, "anti_cheat_hook", false);
+        obs_data_set_bool(settings, "sli_compatibility", false);
+        obs_data_set_bool(settings, "capture_audio", false);
+        obs_data_set_int(settings, "hook_rate", 3);
+
+        openGlProbeSource_ = obs_source_create_private(
+            "game_capture",
+            "Clatasha OpenGL Probe",
+            settings);
+
+        obs_data_release(settings);
+
+        if (!openGlProbeSource_) {
+            blog(LOG_WARNING,
+                 "[Clatasha HUD] Could not create private OBS Game Capture OpenGL probe");
+            return;
+        }
+
+        obs_source_inc_showing(openGlProbeSource_);
+        openGlProbeShowing_ = true;
+
+        blog(LOG_INFO,
+             "[Clatasha HUD] Armed private OBS Game Capture probe for Allumeria.exe");
+    }
+
+    const bool hooked = queryOpenGlGameCaptureHooked();
+    if (hooked != openGlProbeHooked_) {
+        openGlProbeHooked_ = hooked;
+        blog(hooked ? LOG_INFO : LOG_WARNING,
+             hooked
+                 ? "[Clatasha HUD] OBS OpenGL probe hooked Allumeria.exe"
+                 : "[Clatasha HUD] OBS OpenGL probe is no longer hooked");
+    }
+#else
+    releaseOpenGlGameCaptureProbe();
 #endif
 }
 
@@ -451,6 +562,8 @@ void ClatashaHudWindow::readFpsState()
                  trackedGamePid_);
         }
     }
+
+    updateOpenGlGameCaptureProbe();
 
     if (found) {
         if (gameFpsValid_) {
@@ -704,11 +817,14 @@ void ClatashaHudWindow::refresh()
             }
         }
 #endif
+        updateOpenGlGameCaptureProbe();
+
         blog(LOG_INFO,
-             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s",
+             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_probe=%s",
              trackedGamePid_,
              helperAlive ? "running" : "stopped",
-             gameFpsValid_ ? QString::number(gameFps_, 'f', 1).toUtf8().constData() : "--");
+             gameFpsValid_ ? QString::number(gameFps_, 'f', 1).toUtf8().constData() : "--",
+             openGlProbeHooked_ ? "hooked" : (openGlProbeSource_ ? "arming" : "off"));
     }
 
     if (++audioRefreshTicks_ >= 20) {
