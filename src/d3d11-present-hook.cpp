@@ -27,6 +27,8 @@ constexpr int kHudHeight = 50;
 constexpr int kHudMargin = 12;
 constexpr int kHudStride = kHudWidth * 4;
 constexpr int kHudFrameBytes = kHudStride * kHudHeight;
+constexpr std::uint32_t kHudStatusLocationShift = 30;
+constexpr std::uint32_t kHudStatusLocationMask = 0x3u;
 
 enum DrawStage : LONG {
     DrawStageIdle = 0,
@@ -773,18 +775,51 @@ void DrawHud(
         static_cast<float>(
             g_backBufferHeight);
 
+    const std::uint32_t packedPlacementStatus =
+        static_cast<std::uint32_t>(
+            InterlockedCompareExchange(
+                &g_shared->liveHudStatus,
+                0,
+                0));
+    const std::uint32_t locationCode =
+        (packedPlacementStatus >>
+         kHudStatusLocationShift) &
+        kHudStatusLocationMask;
+
+    const bool anchorRight =
+        locationCode == 1u ||
+        locationCode == 3u;
+    const bool anchorBottom =
+        locationCode == 2u ||
+        locationCode == 3u;
+
     const float leftPx =
-        width -
-        static_cast<float>(kHudWidth) -
-        static_cast<float>(kHudMargin);
+        anchorRight
+            ? width -
+                  static_cast<float>(
+                      kHudWidth) -
+                  static_cast<float>(
+                      kHudMargin)
+            : static_cast<float>(
+                  kHudMargin);
     const float rightPx =
         leftPx +
-        static_cast<float>(kHudWidth);
+        static_cast<float>(
+            kHudWidth);
+
     const float topPx =
-        static_cast<float>(kHudMargin);
+        anchorBottom
+            ? height -
+                  static_cast<float>(
+                      kHudHeight) -
+                  static_cast<float>(
+                      kHudMargin)
+            : static_cast<float>(
+                  kHudMargin);
     const float bottomPx =
         topPx +
-        static_cast<float>(kHudHeight);
+        static_cast<float>(
+            kHudHeight);
 
     const auto ndcX =
         [width](float px) {
