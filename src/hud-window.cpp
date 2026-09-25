@@ -35,6 +35,88 @@ constexpr int kScreenMargin = 12;
 constexpr qint64 kFpsHoldMs = 2000;
 constexpr double kFpsSmoothingAlpha = 0.45;
 
+#ifdef Q_OS_WIN
+constexpr std::uint32_t kOpenGlSharedMagic = 0x4C474F43;
+constexpr std::uint32_t kOpenGlSharedVersion = 3;
+
+struct alignas(8) OpenGlPresentSharedTransport {
+    std::uint32_t magic;
+    std::uint32_t version;
+    std::uint32_t pid;
+    volatile LONG liveFpsAck;
+    volatile LONG64 presentCount;
+    volatile LONG64 lastPresentTick;
+    volatile LONG hookState;
+    volatile LONG hookedMask;
+    volatile LONG drawMarker;
+    volatile LONG reservedControl;
+    volatile LONG64 drawCount;
+    volatile LONG64 lastDrawTick;
+    volatile LONG renderMode;
+    volatile LONG liveFpsInput;
+};
+
+void PublishOpenGlObsFps(quint32 pid, double obsFps)
+{
+    if (pid == 0 || !std::isfinite(obsFps) || obsFps <= 0.0)
+        return;
+
+    wchar_t name[96] = {};
+    swprintf_s(name, L"Local\\ClatashaHUD_OGL_%u", pid);
+
+    HANDLE mapping = OpenFileMappingW(
+        FILE_MAP_READ | FILE_MAP_WRITE,
+        FALSE,
+        name);
+    if (!mapping)
+        return;
+
+    auto *shared =
+        static_cast<OpenGlPresentSharedTransport *>(
+            MapViewOfFile(
+                mapping,
+                FILE_MAP_READ | FILE_MAP_WRITE,
+                0,
+                0,
+                sizeof(OpenGlPresentSharedTransport)));
+    if (!shared) {
+        CloseHandle(mapping);
+        return;
+    }
+
+    if (shared->magic == kOpenGlSharedMagic &&
+        shared->version == kOpenGlSharedVersion &&
+        shared->pid == pid) {
+        const LONG obsFpsInt =
+            std::clamp<LONG>(
+                static_cast<LONG>(std::lround(obsFps)),
+                0,
+                0xFFFF);
+
+        LONG packed = 0;
+        LONG nextPacked = 0;
+        do {
+            packed =
+                InterlockedCompareExchange(
+                    &shared->liveFpsInput,
+                    0,
+                    0);
+            const LONG gameBits = packed & 0xFFFF;
+            nextPacked =
+                gameBits |
+                ((obsFpsInt & 0xFFFF) << 16);
+        } while (
+            InterlockedCompareExchange(
+                &shared->liveFpsInput,
+                nextPacked,
+                packed) != packed);
+    }
+
+    UnmapViewOfFile(shared);
+    CloseHandle(mapping);
+}
+#endif
+
 const char kLogoBase64[] =
 "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAL50lEQVR42u2af4xcV3XHP+fe92Z2dr3erLG9oc6PFtYQBScN"
 "TYIClAa1RhFFEQEsQ6FOVKn/8AeEKoJWamsk06hV/yltIaJVVKm2SguEUCVtSqlpq5BiQtOkJXYThyYGDLbjH9i79uzOvLn3"
@@ -333,6 +415,8 @@ void ClatashaHudWindow::updateForegroundGame()
     openGlDrawStage_ = 0;
     openGlLiveFpsSent_ = 0;
     openGlLiveFpsAck_ = 0;
+    openGlLiveObsFpsSent_ = 0;
+    openGlLiveObsFpsAck_ = 0;
     gameFullscreen_ = false;
     rendererMissSamples_ = 0;
     update();
@@ -409,6 +493,8 @@ void ClatashaHudWindow::readFpsState()
     int openGlDrawStage = 0;
     int openGlLiveFpsSent = 0;
     int openGlLiveFpsAck = 0;
+    int openGlLiveObsFpsSent = 0;
+    int openGlLiveObsFpsAck = 0;
     bool fullscreen = false;
 
     while (!file.atEnd()) {
@@ -472,6 +558,20 @@ void ClatashaHudWindow::readFpsState()
                 fields.at(11).toInt(&liveFpsAckOk);
             if (liveFpsAckOk)
                 openGlLiveFpsAck = parsedLiveFpsAck;
+        }
+        if (fields.size() >= 13) {
+            bool liveObsFpsSentOk = false;
+            const int parsedLiveObsFpsSent =
+                fields.at(12).toInt(&liveObsFpsSentOk);
+            if (liveObsFpsSentOk)
+                openGlLiveObsFpsSent = parsedLiveObsFpsSent;
+        }
+        if (fields.size() >= 14) {
+            bool liveObsFpsAckOk = false;
+            const int parsedLiveObsFpsAck =
+                fields.at(13).toInt(&liveObsFpsAckOk);
+            if (liveObsFpsAckOk)
+                openGlLiveObsFpsAck = parsedLiveObsFpsAck;
         }
 
         if (fpsOk && std::isfinite(value) && value > 0.0 && value < 2000.0) {
@@ -568,8 +668,14 @@ void ClatashaHudWindow::readFpsState()
     const bool firstLiveFpsAck =
         openGlLiveFpsAck_ == 0 &&
         openGlLiveFpsAck > 0;
+    const bool firstLiveObsFpsAck =
+        openGlLiveObsFpsAck_ == 0 &&
+        openGlLiveObsFpsAck > 0;
+
     openGlLiveFpsSent_ = openGlLiveFpsSent;
     openGlLiveFpsAck_ = openGlLiveFpsAck;
+    openGlLiveObsFpsSent_ = openGlLiveObsFpsSent;
+    openGlLiveObsFpsAck_ = openGlLiveObsFpsAck;
 
     if (firstLiveFpsAck) {
         blog(LOG_INFO,
@@ -577,6 +683,14 @@ void ClatashaHudWindow::readFpsState()
              trackedGamePid_,
              openGlLiveFpsSent_,
              openGlLiveFpsAck_);
+    }
+
+    if (firstLiveObsFpsAck) {
+        blog(LOG_INFO,
+             "[Clatasha HUD] OpenGL live OBS FPS transport PID %u acknowledged: tx=%d rx=%d",
+             trackedGamePid_,
+             openGlLiveObsFpsSent_,
+             openGlLiveObsFpsAck_);
     }
 
     if (found) {
@@ -783,6 +897,10 @@ void ClatashaHudWindow::refresh()
         updateForegroundGame();
     }
 
+#ifdef Q_OS_WIN
+    PublishOpenGlObsFps(trackedGamePid_, obsFps_);
+#endif
+
     if (++fpsStateRefreshTicks_ >= 2) {
         fpsStateRefreshTicks_ = 0;
         readFpsState();
@@ -850,7 +968,7 @@ void ClatashaHudWindow::refresh()
         }
 
         blog(LOG_INFO,
-             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s ogl_draw=%s draws=%llu ogl_render=%s ogl_stage=%d(%s) ogl_fps_tx=%d ogl_fps_rx=%d",
+             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s ogl_draw=%s draws=%llu ogl_render=%s ogl_stage=%d(%s) ogl_fps_tx=%d ogl_fps_rx=%d ogl_obs_tx=%d ogl_obs_rx=%d",
              trackedGamePid_,
              helperAlive ? "running" : "stopped",
              gameFpsValid_ ? QString::number(gameFps_, 'f', 1).toUtf8().constData() : "--",
@@ -865,7 +983,9 @@ void ClatashaHudWindow::refresh()
              openGlDrawStage_,
              openGlStageName,
              openGlLiveFpsSent_,
-             openGlLiveFpsAck_);
+             openGlLiveFpsAck_,
+             openGlLiveObsFpsSent_,
+             openGlLiveObsFpsAck_);
     }
 
     if (++audioRefreshTicks_ >= 20) {
