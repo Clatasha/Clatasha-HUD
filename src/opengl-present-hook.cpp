@@ -3,6 +3,8 @@
 #endif
 
 #include <windows.h>
+#include <wincrypt.h>
+#include <shlwapi.h>
 #include <gdiplus.h>
 #include <detours.h>
 #include <GL/gl.h>
@@ -88,7 +90,6 @@ WglSwapLayerBuffersFn g_realWglSwapLayerBuffers = nullptr;
 
 HANDLE g_sharedMapping = nullptr;
 OpenGlPresentShared *g_shared = nullptr;
-HINSTANCE g_moduleInstance = nullptr;
 thread_local LONG g_swapDepth = 0;
 
 void SetHookState(LONG state, LONG mask)
@@ -272,37 +273,85 @@ void DrawMeter(HDC dc, int x, int y)
     DeleteObject(inactive);
 }
 
-std::wstring ModuleSiblingPath(const wchar_t *fileName)
+const char kLogoBase64[] =
+"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAL50lEQVR42u2af4xcV3XHP+fe92Z2dr3erLG9oc6PFtYQBScN"
+"TYIClAa1RhFFEQEsQ6FOVKn/8AeEKoJWamsk06hV/yltIaJVVKm2SguEUCVtSqlpq5BiQtOkJXYThyYGDLbjH9i79uzOvLn3"
+"HP549828XTvJbFjSVJ0jze78eO/OPb++53vOHRjJSEYykpGMZCQjGclIRjKS/4ciL+62+9327Xe5omi+LJRodLt8/sMfVt7+"
+"dn0JDPaP7mXsULdSp8oKrzWAre+4df18e+4DwcIsWDQt13E48EAEPKgqGIjDRKvvcihaXgsgigkm6gRABDND6utAeo6mXbj0"
+"3GFqznt3pNmc/JuHvvLZQ8v3uloGEMCuu+N27BvP/EURO7/WaDTwYv1vkfpqIphaqbyAGjgBcVJeZOV9lv6Iq93c37ohSP+1"
+"lX+wtCbV/eVydHuBVnPsXy5eM/2L9/3dXw5thOEMsHevY+tWvfrn3vav5O7GGLr27PFjvXNn24gIhhmKmIBLm1YDUzOR8hJD"
+"pNq4c6AKJmZEpDTMQDkzS3aU9LzSJYWHVNcbzkGr0bCNG2Zca814HmI8tlY2vvLr3/zcUEbIXkj3nbff7ndt3RqvefNNN4du"
+"uDF2FjpHjhzL37N9W/YLN76JxcUOLm1I+tpaek5NgZrVK8fa4PVyb8gSA6RoqF+UoqTZavHQI9/ir+6+2y7qrVu46KLpi8/Y"
+"yd8FPrFjxw6/Z8+e8OPByv33O4CrrnvrY1df/0s2sf7V3d++84+imb2sHn/+2Xtjc/KVxZXX/LzNvu6N7W3vumWoCJehgO9d"
+"t/C6p55diLlvHT58OOx/4nE3s2GSEyfP4fL8PO/6EqKWiBeIVvvCFJx17/dTZBkkVGvWN5wLnOzC6Y6xfu0Y4+Nw9auvtixv"
+"+EZzjEK8HPqvB18wDbJhgmDL4/vptGbEmZFlGUW3C0ySNxs4qVfFMtyFBHrn1agLpAPnG+G899KTuvJne7BoMNksAXWxA5Ln"
+"mAiK0mpmA+D4cQ2QT7RYDAETh6r2Vws9I8usv9nKCCYgCiYXCjXrv1HtTLXMceeE5Zf1I8HK9RywEOB0URqiAk6RVHbFMMto"
+"zw2X4UMZoNPpYn5CzayPXAZsWtdktVhRAcy3B3hllcdtEAIOI2ipfCZVqRwYVzWWzrAcLlpFA4y1mnSLgGlCdVPGgd1f/DKf"
+"/tSnWNNqYjH2PadlCIsqZmYiDjM1fJ6Jc54YgoEgDkIIZFnOZ/7s02y+7GJOnevhnCyN21q9P9MdvC55gqVqU+7Nqsox1149"
+"A/RJB0ZRdJmcWsupReO2be+k6TOauWBZDppqdBkoZgIKhoJ4h7YLcxMTZGum+upljZxTh7/D+977qzy2b2+paFJaGKSRx5gr"
+"ICRS9dyIbShaQenqGSBxMaIq480mh589iUe5/K3vpvv+u2lmkWZDGWsJWUPIMshb0Gg48lxpTjXIdJHHfuVmznz/e9AcSwls"
+"tvGyS2m32xIBn2XEEPuGqEL8bA+6sVK+xIzK833lNYGnDa/VCiJAK+6KGIy3xlEC57a8F39tE46CrAVpgh+HRgOyBvgGZGPg"
+"PMysmUReewWXFT22bP1lOmfnEd+Ur/z9F5CS7BNtWU0x6CoshpryIkuJFCCuchErssBwILhYYHhXhTcChAKjQfZPd3ImZiw0"
+"MjJfkDWERhMaWWmAyQ1TtJqebG3OybmTHP+H+7jpg7/Jpk2XyMLZeTZccpkd3P8oR488U2sDUjkVCArtHrVKIwMVSwjol05M"
+"MXN9w6xqBIhkKQ0ST8fAj0nv1A/Y/OBHLZiJhkgVu2UV9PLEwYPWbI4JZGWJmpiybqctp48fY7HTodHMJJohZc6aRaVqBtVK"
+"5VleTutKn8c3HCuxwFAGmGw1WFiMWmd7WaMBcd62/95d8vFf/4AcTotp8o6B/BTwO5/Zw+7fuMMufs0s1uvJ/JnTZGNrbN3G"
+"TXJuYY7J6RkAcyLJtA4IGMJCjwtQp4HSch5KSeoyZeg+dygDfBPHq1Cqll6AEHoAfONLf2t/unEd8z88WzZpLrXCCBNTEzx6"
+"771MvWJa6PVMgFZrQh765wfs8OU/Q6/XwzKxp596gonxZlKixILFUEP8usdrwCjLIkMQBC3xwJ5/prEiA1yPcjz517mMM3Nn"
+"eNXMNG94y03y8AP32MMP3HMB7tbnkbjxKezUyRSxwg8OPc1/7tubCp0HunzkD/64DPuoBBxBB8o/lxZ1ICyjTkvvo7VJyrIg"
+"eTEREHBL2tpQlN7f9+CXbd9/7MfnDUBQU0I54iiJgAihF7EYrArPch4giHgE6PUKpqenuPaKyzl6LhDN0Y1l8zQgPEu9X6Wh"
+"LTdKIqoWZWh0G7IKdBDWOEtJ4F3Z1swtKG++dkv/Ol2KASXPr31mF/CkJBp8dK6E+m5cppwtDXVkaTpUbvEuAfMKx4JDUuEx"
+"FhaiSm3h0uKBk+fKAVcwJNY2X4GRpcmNIaZmEhG8lFyi0kwA7x1FPB/V++OvivwsU7xqhMwGQ5LSUX6ViVDyZ52oiAjeCWbg"
+"EIsOzEzSONAUxNQw58xqGb88lx3Qi8ub6uVIX/KCOkNcntyK4iuy5vxQtXAowjw1NYWW2bUkmCUVnNJpJpKYe+mVNLkbeFSW"
+"b1pTN9fTsuazbMAq8hyTG3ue+Y34cmcaZdUioN0+V/bjCA5hbKxZDSVFyl6HWqe8ZIorgJpJHa3TR4DRM0NNLozwDKhv/z47"
+"3/shwkQL8ryBahlTFuNQXcFQBvj3Rx7lp6+4HlBCp8uh7xxi4/TPMjnRXAJ+ahCSMSqjaEztvUufxRKrqrF4vFCZW478cn4V"
+"IA1HNMJMCw6danP82HE2XXoJYLTE6TCNgXvB1OejZdqaHkA80zMz+p7tt/HEwW9LBhTB6PXKR1EosVBiYWgBoVBiVEJUKboq"
+"saMSg6KqaDBCUGJQeum/RsOiYUHR9DpGIwYlpEfU8qERQlR8DgePnuDdN7+TsVZT8zzHufzsk08+sjpj8aqQOZfdES18be3k"
+"Gjc/PxevvOaNbv266ZK3ieBFEKmmftXsfjAur2Y69fm2DTwtllBALE3TnJiIhxjBOZwIGs3MIUTFLBh4fGacOH6asZaz9es3"
+"xqiSO68fA+DWWz27d4dVOBna62Crzm55wydD4HZxAhbpdrqoGc45RBL76qNi1as6MKn36bGsgK7EBxRJJwuKIeKccyW8igho"
+"SOcMrqJYBI2oJcqrSt7Ik10b4N1XD+3/+tYU3S94WLri0+HZK294R7T4yRjD7ICLWn8SIZIlj1enOw7nU6NiQIzRO0/E0hjN"
+"W+YrWuAkijinhnceNQfOIAYEwZwh0TBXgkwwLecUzuFUjojL73zmv/fdtZLzwZUaoG/V18zewGltlxvot8spZazk5ZJG5rGb"
+"u3xStPvDE38izn/IVAur5prJv0BwzjWEuDefnHlbUbTZ4D2nUhnmTGnks8ylwHKYlt+9NjZ5+ruPvFS/D9jpYZeubPBUyqWb"
+"r/o3NXuTxlhUnKhWOtV5lzvnjnz/fx7f9KK02bnTs2tXfAl+IPG898qOHTvcnj17tEb0ItddxeaFcVMCaoQBp+sfepqIZCCo"
+"y+S7Bx6G2iFTOud7PsPbSxQBKxQzZm+4nkZ77Pc1k99S1R6m7kI7MSM65xsW7a9zbb7/wIGvXoA/rvovPlZ9PXv9W275uCd+"
+"JHaLBU4cU133ionomTZVEDTFBHgPTpFggMc5iDGYiPMe7fpTc8dZv9G7RnO8iL374vyG2w4c2CMv1ts/YQPs9LArvvaarVfl"
+"mX0rxKLsAtNRuZl1LM1ulzez9d8EpE0pyBhCnwc0mhMUYfF9Tz36tc/dum1btvuee8Jq7DpbPQPsMoDo26c7Zzu4LEvVIDEf"
+"kbGlpyzl4YXUWl2rdZlGWeMrdxdFgcuy4wC7Z2ft5ZoCDtBNm19/o0M/pFhHDGeSqRclKg5BMTfAAAmK4TwZFXx7tDxIUCNK"
+"UC/5eDD90pFvP7aHFfz+539LhP9D8hPa7Mc8258UilU6O24ofP4Kgz+MjGQkIxnJSEYykpGMZCSrIj8C1St+s7ZbapQAAAAA"
+"SUVORK5CYII=";
+
+bool DrawEmbeddedLogo(HDC dc)
 {
-    if (!g_moduleInstance || !fileName)
-        return {};
+    DWORD decodedSize = 0;
+    if (!CryptStringToBinaryA(
+            kLogoBase64,
+            0,
+            CRYPT_STRING_BASE64,
+            nullptr,
+            &decodedSize,
+            nullptr,
+            nullptr) ||
+        decodedSize == 0) {
+        return false;
+    }
 
-    wchar_t path[MAX_PATH] = {};
-    const DWORD length =
-        GetModuleFileNameW(
-            g_moduleInstance,
-            path,
-            MAX_PATH);
-    if (length == 0 || length >= MAX_PATH)
-        return {};
+    std::vector<BYTE> decoded(
+        static_cast<size_t>(decodedSize));
+    if (!CryptStringToBinaryA(
+            kLogoBase64,
+            0,
+            CRYPT_STRING_BASE64,
+            decoded.data(),
+            &decodedSize,
+            nullptr,
+            nullptr)) {
+        return false;
+    }
 
-    std::wstring result(path, length);
-    const size_t separator =
-        result.find_last_of(L"\\/");
-    if (separator == std::wstring::npos)
-        return {};
-
-    result.erase(separator + 1);
-    result += fileName;
-    return result;
-}
-
-bool DrawPackagedLogo(HDC dc)
-{
-    const std::wstring logoPath =
-        ModuleSiblingPath(
-            L"clatasha-hud-logo.png");
-    if (logoPath.empty())
+    IStream *stream =
+        SHCreateMemStream(
+            decoded.data(),
+            decodedSize);
+    if (!stream)
         return false;
 
     Gdiplus::GdiplusStartupInput startupInput;
@@ -311,21 +360,26 @@ bool DrawPackagedLogo(HDC dc)
             &token,
             &startupInput,
             nullptr) != Gdiplus::Ok) {
+        stream->Release();
         return false;
     }
 
     bool drawn = false;
     {
         Gdiplus::Image image(
-            logoPath.c_str(),
+            stream,
             FALSE);
         if (image.GetLastStatus() ==
             Gdiplus::Ok) {
             Gdiplus::Graphics graphics(dc);
             graphics.SetCompositingMode(
                 Gdiplus::CompositingModeSourceOver);
+            graphics.SetCompositingQuality(
+                Gdiplus::CompositingQualityHighQuality);
             graphics.SetInterpolationMode(
                 Gdiplus::InterpolationModeHighQualityBicubic);
+            graphics.SetSmoothingMode(
+                Gdiplus::SmoothingModeHighQuality);
             graphics.SetPixelOffsetMode(
                 Gdiplus::PixelOffsetModeHighQuality);
 
@@ -340,6 +394,7 @@ bool DrawPackagedLogo(HDC dc)
     }
 
     Gdiplus::GdiplusShutdown(token);
+    stream->Release();
     return drawn;
 }
 
@@ -463,7 +518,7 @@ bool BuildStaticHudPixels()
     LineTo(dc, 17, 47);
 
     HBRUSH logoBrush = nullptr;
-    if (!DrawPackagedLogo(dc)) {
+    if (!DrawEmbeddedLogo(dc)) {
         logoBrush =
             CreateSolidBrush(
                 RGB(240, 243, 245));
@@ -2578,7 +2633,6 @@ DWORD WINAPI HookWorker(void *)
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
-        g_moduleInstance = instance;
         DisableThreadLibraryCalls(instance);
         DetourRestoreAfterWith();
 
