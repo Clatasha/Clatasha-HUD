@@ -243,7 +243,7 @@ struct alignas(8) OpenGlPresentShared {
     volatile LONG hookState;
     volatile LONG hookedMask;
     volatile LONG drawMarker;
-    volatile LONG reservedControl;
+    volatile LONG reservedControl; // draw-stage diagnostic
     volatile LONG64 drawCount;
     volatile LONG64 lastDrawTick;
     volatile LONG renderMode;
@@ -456,6 +456,7 @@ struct OpenGlSample {
     bool drawArmed = false;
     std::uint64_t drawCount = 0;
     LONG renderMode = 0;
+    LONG drawStage = 0;
 };
 
 OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armOverlay)
@@ -504,6 +505,7 @@ OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armOverlay)
         result.drawCount =
             static_cast<std::uint64_t>(shared->drawCount);
         result.renderMode = shared->renderMode;
+        result.drawStage = shared->reservedControl;
 
         if (state == 1) {
             result.status = "active";
@@ -671,7 +673,7 @@ void WriteStateFile(const std::wstring &path)
     if (_wfopen_s(&fp, tmpPath.c_str(), L"wb") != 0 || !fp)
         return;
 
-    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_hook,ogl_mask,ogl_draw,ogl_draws,ogl_render\n");
+    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_hook,ogl_mask,ogl_draw,ogl_draws,ogl_render,ogl_stage\n");
 
     for (const auto &[pid, streams] : gRates) {
         double bestFps = 0.0;
@@ -707,7 +709,7 @@ void WriteStateFile(const std::wstring &path)
             if (pid == foregroundPid && !foregroundRenderer.empty()) {
                 std::fprintf(
                     fp,
-                    "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld\n",
+                    "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld\n",
                     pid,
                     bestFps,
                     foregroundRenderer.c_str(),
@@ -716,7 +718,8 @@ void WriteStateFile(const std::wstring &path)
                     openGlSample.hookedMask,
                     openGlSample.drawArmed ? 1 : 0,
                     static_cast<unsigned long long>(openGlSample.drawCount),
-                    openGlSample.renderMode);
+                    openGlSample.renderMode,
+                    openGlSample.drawStage);
                 foregroundWritten = true;
             } else {
                 std::fprintf(fp, "%lu,%.3f\n", pid, bestFps);
@@ -732,7 +735,7 @@ void WriteStateFile(const std::wstring &path)
         !foregroundWritten) {
         std::fprintf(
             fp,
-            "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld\n",
+            "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld\n",
             foregroundPid,
             openGlSample.validFps ? openGlSample.fps : 0.0,
             foregroundRenderer.c_str(),
@@ -741,7 +744,8 @@ void WriteStateFile(const std::wstring &path)
             openGlSample.hookedMask,
             openGlSample.drawArmed ? 1 : 0,
             static_cast<unsigned long long>(openGlSample.drawCount),
-            openGlSample.renderMode);
+            openGlSample.renderMode,
+            openGlSample.drawStage);
     }
 
     std::fclose(fp);
