@@ -59,7 +59,7 @@ if(WIN32)
   )
   target_link_libraries(
     clatasha-opengl-present-hook
-    PRIVATE Detours::Detours
+    PRIVATE Detours::Detours opengl32
   )
   set_target_properties(
     clatasha-opengl-present-hook

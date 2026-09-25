@@ -11,7 +11,7 @@
 namespace {
 
 constexpr std::uint32_t kSharedMagic = 0x4C474F43; // "COGL"
-constexpr std::uint32_t kSharedVersion = 1;
+constexpr std::uint32_t kSharedVersion = 2;
 
 enum HookBits : LONG {
     HookSwapBuffers = 1 << 0,
@@ -28,6 +28,10 @@ struct alignas(8) OpenGlPresentShared {
     volatile LONG64 lastPresentTick;
     volatile LONG hookState; // 0 = starting, 1 = active, 2 = failed
     volatile LONG hookedMask;
+    volatile LONG drawMarker;
+    volatile LONG reservedControl;
+    volatile LONG64 drawCount;
+    volatile LONG64 lastDrawTick;
 };
 
 using SwapBuffersFn = BOOL (WINAPI *)(HDC);
@@ -62,10 +66,119 @@ void RecordPresent()
         static_cast<LONG64>(GetTickCount64()));
 }
 
-void SwapBegin()
+bool IsFullscreenWindow(HWND hwnd)
 {
-    if (g_swapDepth++ == 0)
+    if (!hwnd || hwnd != GetForegroundWindow() ||
+        !IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+        return false;
+    }
+
+    RECT client{};
+    if (!GetClientRect(hwnd, &client))
+        return false;
+
+    POINT topLeft{client.left, client.top};
+    POINT bottomRight{client.right, client.bottom};
+    if (!ClientToScreen(hwnd, &topLeft) ||
+        !ClientToScreen(hwnd, &bottomRight)) {
+        return false;
+    }
+
+    HMONITOR monitor =
+        MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if (!monitor)
+        return false;
+
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info))
+        return false;
+
+    constexpr LONG tolerance = 3;
+    const RECT &screen = info.rcMonitor;
+
+    return topLeft.x <= screen.left + tolerance &&
+           topLeft.y <= screen.top + tolerance &&
+           bottomRight.x >= screen.right - tolerance &&
+           bottomRight.y >= screen.bottom - tolerance;
+}
+
+bool ShouldDrawMarker(HDC dc)
+{
+    if (!g_shared ||
+        InterlockedCompareExchange(&g_shared->drawMarker, 0, 0) == 0 ||
+        !dc ||
+        !wglGetCurrentContext()) {
+        return false;
+    }
+
+    if (wglGetCurrentDC() != dc)
+        return false;
+
+    return IsFullscreenWindow(WindowFromDC(dc));
+}
+
+void DrawTestMarker(HDC dc)
+{
+    if (!ShouldDrawMarker(dc))
+        return;
+
+    GLint viewport[4] = {};
+    GLint oldScissor[4] = {};
+    GLfloat oldClearColor[4] = {};
+    GLboolean oldColorMask[4] = {};
+    const GLboolean scissorWasEnabled =
+        glIsEnabled(GL_SCISSOR_TEST);
+
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    if (viewport[2] < 64 || viewport[3] < 64)
+        return;
+
+    glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, oldClearColor);
+    glGetBooleanv(GL_COLOR_WRITEMASK, oldColorMask);
+
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(
+        viewport[0] + viewport[2] - 30,
+        viewport[1] + viewport[3] - 30,
+        18,
+        18);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0.10f, 1.0f, 0.20f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glColorMask(
+        oldColorMask[0],
+        oldColorMask[1],
+        oldColorMask[2],
+        oldColorMask[3]);
+    glClearColor(
+        oldClearColor[0],
+        oldClearColor[1],
+        oldClearColor[2],
+        oldClearColor[3]);
+    glScissor(
+        oldScissor[0],
+        oldScissor[1],
+        oldScissor[2],
+        oldScissor[3]);
+
+    if (!scissorWasEnabled)
+        glDisable(GL_SCISSOR_TEST);
+
+    InterlockedIncrement64(&g_shared->drawCount);
+    InterlockedExchange64(
+        &g_shared->lastDrawTick,
+        static_cast<LONG64>(GetTickCount64()));
+}
+
+void SwapBegin(HDC dc)
+{
+    if (g_swapDepth++ == 0) {
         RecordPresent();
+        DrawTestMarker(dc);
+    }
 }
 
 void SwapEnd()
@@ -76,7 +189,7 @@ void SwapEnd()
 
 BOOL WINAPI HookedSwapBuffers(HDC dc)
 {
-    SwapBegin();
+    SwapBegin(dc);
     const BOOL result =
         g_realSwapBuffers ? g_realSwapBuffers(dc) : FALSE;
     SwapEnd();

@@ -91,6 +91,8 @@ private:
     QString detectedGameRenderer_;
     QString gameRenderer_;
     QString openGlHookStatus_;
+    bool openGlDrawArmed_ = false;
+    quint64 openGlDrawCount_ = 0;
     bool gameFullscreen_ = false;
     int rendererMissSamples_ = 0;
     int gameTargetRefreshTicks_ = 0;

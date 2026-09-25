@@ -231,7 +231,7 @@ bool IsFullscreenForegroundWindow(HWND hwnd)
 }
 
 constexpr std::uint32_t kOpenGlSharedMagic = 0x4C474F43;
-constexpr std::uint32_t kOpenGlSharedVersion = 1;
+constexpr std::uint32_t kOpenGlSharedVersion = 2;
 
 struct alignas(8) OpenGlPresentShared {
     std::uint32_t magic;
@@ -242,6 +242,10 @@ struct alignas(8) OpenGlPresentShared {
     volatile LONG64 lastPresentTick;
     volatile LONG hookState;
     volatile LONG hookedMask;
+    volatile LONG drawMarker;
+    volatile LONG reservedControl;
+    volatile LONG64 drawCount;
+    volatile LONG64 lastDrawTick;
 };
 
 struct OpenGlRateState {
@@ -447,9 +451,11 @@ struct OpenGlSample {
     bool validFps = false;
     std::string status = "off";
     LONG hookedMask = 0;
+    bool drawArmed = false;
+    std::uint64_t drawCount = 0;
 };
 
-OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now)
+OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armMarker)
 {
     OpenGlSample result;
     if (pid == 0)
@@ -463,17 +469,17 @@ OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now)
     swprintf_s(name, L"Local\\ClatashaHUD_OGL_%lu", pid);
 
     HANDLE mapping = OpenFileMappingW(
-        FILE_MAP_READ,
+        FILE_MAP_READ | FILE_MAP_WRITE,
         FALSE,
         name);
     if (!mapping)
         return result;
 
-    const auto *shared =
-        static_cast<const OpenGlPresentShared *>(
+    auto *shared =
+        static_cast<OpenGlPresentShared *>(
             MapViewOfFile(
                 mapping,
-                FILE_MAP_READ,
+                FILE_MAP_READ | FILE_MAP_WRITE,
                 0,
                 0,
                 sizeof(OpenGlPresentShared)));
@@ -485,8 +491,15 @@ OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now)
     if (shared->magic == kOpenGlSharedMagic &&
         shared->version == kOpenGlSharedVersion &&
         shared->pid == pid) {
+        InterlockedExchange(
+            &shared->drawMarker,
+            armMarker ? 1 : 0);
+
         const LONG state = shared->hookState;
         result.hookedMask = shared->hookedMask;
+        result.drawArmed = shared->drawMarker != 0;
+        result.drawCount =
+            static_cast<std::uint64_t>(shared->drawCount);
 
         if (state == 1) {
             result.status = "active";
@@ -619,7 +632,11 @@ void WriteStateFile(const std::wstring &path)
         foregroundPid,
         foregroundRenderer);
     const OpenGlSample openGlSample =
-        ReadOpenGlSample(foregroundPid, now);
+        ReadOpenGlSample(
+            foregroundPid,
+            now,
+            foregroundRenderer == "OGL" &&
+                foregroundFullscreen);
 
     bool foregroundWritten = false;
     std::map<DWORD, std::array<std::uint64_t, kPresentStreamCount>> counts;
@@ -650,7 +667,7 @@ void WriteStateFile(const std::wstring &path)
     if (_wfopen_s(&fp, tmpPath.c_str(), L"wb") != 0 || !fp)
         return;
 
-    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_hook,ogl_mask\n");
+    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_hook,ogl_mask,ogl_draw,ogl_draws\n");
 
     for (const auto &[pid, streams] : gRates) {
         double bestFps = 0.0;
@@ -686,13 +703,15 @@ void WriteStateFile(const std::wstring &path)
             if (pid == foregroundPid && !foregroundRenderer.empty()) {
                 std::fprintf(
                     fp,
-                    "%lu,%.3f,%s,%d,%s,%ld\n",
+                    "%lu,%.3f,%s,%d,%s,%ld,%d,%llu\n",
                     pid,
                     bestFps,
                     foregroundRenderer.c_str(),
                     foregroundFullscreen ? 1 : 0,
                     openGlSample.status.c_str(),
-                    openGlSample.hookedMask);
+                    openGlSample.hookedMask,
+                    openGlSample.drawArmed ? 1 : 0,
+                    static_cast<unsigned long long>(openGlSample.drawCount));
                 foregroundWritten = true;
             } else {
                 std::fprintf(fp, "%lu,%.3f\n", pid, bestFps);
@@ -708,13 +727,15 @@ void WriteStateFile(const std::wstring &path)
         !foregroundWritten) {
         std::fprintf(
             fp,
-            "%lu,%.3f,%s,%d,%s,%ld\n",
+            "%lu,%.3f,%s,%d,%s,%ld,%d,%llu\n",
             foregroundPid,
             openGlSample.validFps ? openGlSample.fps : 0.0,
             foregroundRenderer.c_str(),
             foregroundFullscreen ? 1 : 0,
             openGlSample.status.c_str(),
-            openGlSample.hookedMask);
+            openGlSample.hookedMask,
+            openGlSample.drawArmed ? 1 : 0,
+            static_cast<unsigned long long>(openGlSample.drawCount));
     }
 
     std::fclose(fp);

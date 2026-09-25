@@ -327,6 +327,8 @@ void ClatashaHudWindow::updateForegroundGame()
     detectedGameRenderer_.clear();
     gameRenderer_.clear();
     openGlHookStatus_.clear();
+    openGlDrawArmed_ = false;
+    openGlDrawCount_ = 0;
     gameFullscreen_ = false;
     rendererMissSamples_ = 0;
     update();
@@ -397,6 +399,8 @@ void ClatashaHudWindow::readFpsState()
     double fps = 0.0;
     QString renderer;
     QString openGlHookStatus;
+    bool openGlDrawArmed = false;
+    quint64 openGlDrawCount = 0;
     bool fullscreen = false;
 
     while (!file.atEnd()) {
@@ -424,6 +428,15 @@ void ClatashaHudWindow::readFpsState()
         if (fields.size() >= 5)
             openGlHookStatus =
                 QString::fromUtf8(fields.at(4)).trimmed().toLower();
+        if (fields.size() >= 7)
+            openGlDrawArmed = fields.at(6).trimmed() == "1";
+        if (fields.size() >= 8) {
+            bool drawCountOk = false;
+            const quint64 parsedDrawCount =
+                fields.at(7).toULongLong(&drawCountOk);
+            if (drawCountOk)
+                openGlDrawCount = parsedDrawCount;
+        }
 
         if (fpsOk && std::isfinite(value) && value > 0.0 && value < 2000.0) {
             fps = value;
@@ -470,6 +483,15 @@ void ClatashaHudWindow::readFpsState()
                  openGlHookStatus_.toUtf8().constData());
         }
     }
+
+    if (openGlDrawArmed != openGlDrawArmed_) {
+        openGlDrawArmed_ = openGlDrawArmed;
+        blog(LOG_INFO,
+             "[Clatasha HUD] OpenGL fullscreen marker PID %u: %s",
+             trackedGamePid_,
+             openGlDrawArmed_ ? "armed" : "idle");
+    }
+    openGlDrawCount_ = openGlDrawCount;
 
     if (found) {
         if (gameFpsValid_) {
@@ -724,13 +746,15 @@ void ClatashaHudWindow::refresh()
         }
 #endif
         blog(LOG_INFO,
-             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s",
+             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s ogl_draw=%s draws=%llu",
              trackedGamePid_,
              helperAlive ? "running" : "stopped",
              gameFpsValid_ ? QString::number(gameFps_, 'f', 1).toUtf8().constData() : "--",
              openGlHookStatus_.isEmpty()
                  ? "off"
-                 : openGlHookStatus_.toUtf8().constData());
+                 : openGlHookStatus_.toUtf8().constData(),
+             openGlDrawArmed_ ? "armed" : "idle",
+             static_cast<unsigned long long>(openGlDrawCount_));
     }
 
     if (++audioRefreshTicks_ >= 20) {
