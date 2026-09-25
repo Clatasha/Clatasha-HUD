@@ -32,7 +32,7 @@ constexpr USHORT kDxgiMpoPresentStartEventId = 0x0037;
 constexpr USHORT kD3d9PresentStartEventId = 0x0001;
 constexpr USHORT kDxgKrnlPresentHistoryStartEventId = 0x00ab;
 constexpr USHORT kDxgKrnlPresentHistoryDetailedStartEventId = 0x00d7;
-constexpr DWORD kSampleMs = 250;
+constexpr DWORD kSampleMs = 100;
 constexpr double kWindowMs = 1000.0;
 
 const GUID kDxgiProvider =
@@ -267,6 +267,7 @@ std::map<DWORD, OpenGlRateState> gOpenGlRates;
 std::map<DWORD, std::string> gOpenGlInjectStatus;
 std::map<DWORD, int> gOpenGlInjectAttempts;
 std::map<DWORD, ULONGLONG> gOpenGlInjectLastAttempt;
+std::map<DWORD, bool> gObsGraphicsHookPreexisting;
 
 std::wstring ProcessBaseName(DWORD pid)
 {
@@ -290,6 +291,50 @@ std::wstring ProcessBaseName(DWORD pid)
 
     CloseHandle(process);
     return result;
+}
+
+
+bool ProcessHasModule(
+    DWORD pid,
+    const wchar_t *moduleName)
+{
+    if (pid == 0 || !moduleName || !*moduleName)
+        return false;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(
+        TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
+        pid);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return false;
+
+    bool found = false;
+    MODULEENTRY32W module{};
+    module.dwSize = sizeof(module);
+
+    if (Module32FirstW(snapshot, &module)) {
+        do {
+            if (_wcsicmp(
+                    module.szModule,
+                    moduleName) == 0) {
+                found = true;
+                break;
+            }
+        } while (Module32NextW(snapshot, &module));
+    }
+
+    CloseHandle(snapshot);
+    return found;
+}
+
+bool ObsGraphicsHookAlreadyLoaded(DWORD pid)
+{
+    return
+        ProcessHasModule(
+            pid,
+            L"graphics-hook64.dll") ||
+        ProcessHasModule(
+            pid,
+            L"graphics-hook32.dll");
 }
 
 bool IsNative64BitProcess(DWORD pid)
@@ -445,6 +490,10 @@ void MaybeInjectOpenGlHook(
         return;
 
     int &attempts = gOpenGlInjectAttempts[pid];
+    if (attempts == 0) {
+        gObsGraphicsHookPreexisting[pid] =
+            ObsGraphicsHookAlreadyLoaded(pid);
+    }
     if (attempts >= 3) {
         gOpenGlInjectStatus[pid] = "failed";
         return;
@@ -533,6 +582,10 @@ void MaybeInjectD3D11Hook(
 
     int &attempts =
         gOpenGlInjectAttempts[pid];
+    if (attempts == 0) {
+        gObsGraphicsHookPreexisting[pid] =
+            ObsGraphicsHookAlreadyLoaded(pid);
+    }
     if (attempts >= 3) {
         gOpenGlInjectStatus[pid] = "failed";
         return;
@@ -878,7 +931,17 @@ void WriteStateFile(const std::wstring &path)
     if (_wfopen_s(&fp, tmpPath.c_str(), L"wb") != 0 || !fp)
         return;
 
-    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_hook,ogl_mask,ogl_draw,ogl_draws,ogl_render,ogl_stage,ogl_fps_tx,ogl_fps_rx,ogl_obs_tx,ogl_obs_rx,ogl_timer_tx,ogl_timer_rx,ogl_audio_tx,ogl_audio_rx,ogl_status_tx,ogl_status_rx\n");
+    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_hook,ogl_mask,ogl_draw,ogl_draws,ogl_render,ogl_stage,ogl_fps_tx,ogl_fps_rx,ogl_obs_tx,ogl_obs_rx,ogl_timer_tx,ogl_timer_rx,ogl_audio_tx,ogl_audio_rx,ogl_status_tx,ogl_status_rx,obs_hook_preexisting\n");
+
+    int obsHookPreexisting = -1;
+    const auto orderIt =
+        gObsGraphicsHookPreexisting.find(
+            foregroundPid);
+    if (orderIt !=
+        gObsGraphicsHookPreexisting.end()) {
+        obsHookPreexisting =
+            orderIt->second ? 1 : 0;
+    }
 
     for (const auto &[pid, streams] : gRates) {
         double bestFps = 0.0;
@@ -914,7 +977,7 @@ void WriteStateFile(const std::wstring &path)
             if (pid == foregroundPid && !foregroundRenderer.empty()) {
                 std::fprintf(
                     fp,
-                    "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
+                    "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%d\n",
                     pid,
                     bestFps,
                     foregroundRenderer.c_str(),
@@ -934,7 +997,8 @@ void WriteStateFile(const std::wstring &path)
                     openGlSample.liveAudioSent,
                     openGlSample.liveAudioAck,
                     openGlSample.liveStatusSent,
-                    openGlSample.liveStatusAck);
+                    openGlSample.liveStatusAck,
+                    obsHookPreexisting);
                 foregroundWritten = true;
             } else {
                 std::fprintf(fp, "%lu,%.3f\n", pid, bestFps);
@@ -950,7 +1014,7 @@ void WriteStateFile(const std::wstring &path)
         !foregroundWritten) {
         std::fprintf(
             fp,
-            "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
+            "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%d\n",
             foregroundPid,
             openGlSample.validFps ? openGlSample.fps : 0.0,
             foregroundRenderer.c_str(),
@@ -970,7 +1034,8 @@ void WriteStateFile(const std::wstring &path)
             openGlSample.liveAudioSent,
             openGlSample.liveAudioAck,
             openGlSample.liveStatusSent,
-            openGlSample.liveStatusAck);
+            openGlSample.liveStatusAck,
+            obsHookPreexisting);
     }
 
     std::fclose(fp);
