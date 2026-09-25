@@ -20,13 +20,17 @@ namespace {
 constexpr std::uint32_t kSharedMagic = 0x4C474F43;
 constexpr std::uint32_t kSharedVersion = 6;
 constexpr std::uint32_t kFrameMagic = 0x52464843; // CHFR
-constexpr std::uint32_t kFrameVersion = 2;
+constexpr std::uint32_t kFrameVersion = 3;
 
 constexpr int kHudWidth = 145;
 constexpr int kHudHeight = 50;
+constexpr int kRecordingWarningHeight = 28;
+constexpr int kHudFrameHeight =
+    kHudHeight + kRecordingWarningHeight;
 constexpr int kHudMargin = 12;
 constexpr int kHudStride = kHudWidth * 4;
-constexpr int kHudFrameBytes = kHudStride * kHudHeight;
+constexpr int kHudFrameBytes =
+    kHudStride * kHudFrameHeight;
 constexpr std::uint32_t kHudStatusLocationShift = 30;
 constexpr std::uint32_t kHudStatusLocationMask = 0x3u;
 
@@ -218,7 +222,7 @@ bool CreateMappings()
     g_frameShared->version = kFrameVersion;
     g_frameShared->pid = pid;
     g_frameShared->width = kHudWidth;
-    g_frameShared->height = kHudHeight;
+    g_frameShared->height = kHudFrameHeight;
     g_frameShared->stride = kHudStride;
 
     return true;
@@ -480,7 +484,8 @@ bool CreatePipeline()
 
     D3D11_TEXTURE2D_DESC textureDesc{};
     textureDesc.Width = kHudWidth;
-    textureDesc.Height = kHudHeight;
+    textureDesc.Height =
+        kHudFrameHeight;
     textureDesc.MipLevels = 1;
     textureDesc.ArraySize = 1;
     textureDesc.Format =
@@ -585,7 +590,8 @@ bool EnsureBackBuffer(
                    kHudWidth + kHudMargin * 2) &&
            g_backBufferHeight >=
                static_cast<UINT>(
-                   kHudHeight + kHudMargin * 2);
+                   kHudFrameHeight +
+                   kHudMargin * 2);
 }
 
 bool UpdateHudFrameTexture()
@@ -644,7 +650,9 @@ bool UpdateHudFrameTexture()
         return false;
     }
 
-    for (int y = 0; y < kHudHeight; ++y) {
+    for (int y = 0;
+         y < kHudFrameHeight;
+         ++y) {
         std::memcpy(
             static_cast<std::uint8_t *>(
                 mapped.pData) +
@@ -811,7 +819,7 @@ void DrawHud(
         anchorBottom
             ? height -
                   static_cast<float>(
-                      kHudHeight) -
+                      kHudFrameHeight) -
                   static_cast<float>(
                       kHudMargin)
             : static_cast<float>(
@@ -819,7 +827,7 @@ void DrawHud(
     const float bottomPx =
         topPx +
         static_cast<float>(
-            kHudHeight);
+            kHudFrameHeight);
 
     const auto ndcX =
         [width](float px) {
