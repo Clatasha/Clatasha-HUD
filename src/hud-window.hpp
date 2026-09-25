@@ -42,9 +42,6 @@ private:
     void stopFpsHelper();
     void readFpsState();
     void resetGameFps();
-    void startHudTelemetry();
-    void stopHudTelemetry();
-    void publishHudTelemetry();
     QString fpsStateFilePath() const;
     QString recordingPath() const;
     QString diskSpaceText() const;
@@ -65,8 +62,6 @@ private:
     QElapsedTimer sessionTimer_;
     QElapsedTimer gameFpsClock_;
     quintptr fpsHelperHandle_ = 0;
-    quintptr hudTelemetryMappingHandle_ = 0;
-    quintptr hudTelemetryView_ = 0;
     bool fpsHelperStarted_ = false;
     int fpsHelperRestartAttempts_ = 0;
     int fpsHelperStableChecks_ = 0;
