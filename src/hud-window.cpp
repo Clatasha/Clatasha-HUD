@@ -39,7 +39,7 @@ constexpr double kFpsSmoothingAlpha = 0.45;
 
 #ifdef Q_OS_WIN
 constexpr std::uint32_t kOpenGlSharedMagic = 0x4C474F43;
-constexpr std::uint32_t kOpenGlSharedVersion = 4;
+constexpr std::uint32_t kOpenGlSharedVersion = 5;
 
 struct alignas(8) OpenGlPresentSharedTransport {
     std::uint32_t magic;
@@ -58,11 +58,15 @@ struct alignas(8) OpenGlPresentSharedTransport {
     volatile LONG liveFpsInput;
     volatile LONG liveSessionSeconds;
     volatile LONG liveSessionSecondsAck;
+    volatile LONG liveAudioLevels;
+    volatile LONG liveAudioLevelsAck;
 };
 
 void PublishOpenGlLiveState(quint32 pid,
                             double obsFps,
-                            LONG sessionSeconds)
+                            LONG sessionSeconds,
+                            float desktopLevel,
+                            float micLevel)
 {
     if (pid == 0 || !std::isfinite(obsFps) || obsFps <= 0.0)
         return;
@@ -122,6 +126,38 @@ void PublishOpenGlLiveState(quint32 pid,
         InterlockedExchange(
             &shared->liveSessionSeconds,
             std::max<LONG>(0, sessionSeconds));
+
+        const LONG desktopValue =
+            std::clamp<LONG>(
+                static_cast<LONG>(
+                    std::lround(
+                        std::clamp(
+                            desktopLevel,
+                            0.0f,
+                            1.0f) *
+                        1000.0f)),
+                0,
+                1000);
+        const LONG micValue =
+            std::clamp<LONG>(
+                static_cast<LONG>(
+                    std::lround(
+                        std::clamp(
+                            micLevel,
+                            0.0f,
+                            1.0f) *
+                        1000.0f)),
+                0,
+                1000);
+        const LONG packedAudio =
+            static_cast<LONG>(
+                static_cast<std::uint32_t>(
+                    desktopValue & 0xFFFF) |
+                (static_cast<std::uint32_t>(
+                     micValue & 0xFFFF) << 16));
+        InterlockedExchange(
+            &shared->liveAudioLevels,
+            packedAudio);
     }
 
     UnmapViewOfFile(shared);
@@ -431,6 +467,8 @@ void ClatashaHudWindow::updateForegroundGame()
     openGlLiveObsFpsAck_ = 0;
     openGlLiveTimerSent_ = 0;
     openGlLiveTimerAck_ = 0;
+    openGlLiveAudioSent_ = 0;
+    openGlLiveAudioAck_ = 0;
     gameFullscreen_ = false;
     rendererMissSamples_ = 0;
     update();
@@ -511,6 +549,8 @@ void ClatashaHudWindow::readFpsState()
     int openGlLiveObsFpsAck = 0;
     int openGlLiveTimerSent = 0;
     int openGlLiveTimerAck = 0;
+    int openGlLiveAudioSent = 0;
+    int openGlLiveAudioAck = 0;
     bool fullscreen = false;
 
     while (!file.atEnd()) {
@@ -603,6 +643,20 @@ void ClatashaHudWindow::readFpsState()
             if (liveTimerAckOk)
                 openGlLiveTimerAck = parsedLiveTimerAck;
         }
+        if (fields.size() >= 17) {
+            bool liveAudioSentOk = false;
+            const int parsedLiveAudioSent =
+                fields.at(16).toInt(&liveAudioSentOk);
+            if (liveAudioSentOk)
+                openGlLiveAudioSent = parsedLiveAudioSent;
+        }
+        if (fields.size() >= 18) {
+            bool liveAudioAckOk = false;
+            const int parsedLiveAudioAck =
+                fields.at(17).toInt(&liveAudioAckOk);
+            if (liveAudioAckOk)
+                openGlLiveAudioAck = parsedLiveAudioAck;
+        }
 
         if (fpsOk && std::isfinite(value) && value > 0.0 && value < 2000.0) {
             fps = value;
@@ -684,6 +738,8 @@ void ClatashaHudWindow::readFpsState()
         case 24: stageName = "obs-fps-upload-done"; break;
         case 25: stageName = "timer-upload-entry"; break;
         case 26: stageName = "timer-upload-done"; break;
+        case 27: stageName = "audio-upload-entry"; break;
+        case 28: stageName = "audio-upload-done"; break;
         case 30: stageName = "viewport-ready"; break;
         case 40: stageName = "state-captured"; break;
         case 50: stageName = "overlay-state"; break;
@@ -712,6 +768,8 @@ void ClatashaHudWindow::readFpsState()
     openGlLiveObsFpsAck_ = openGlLiveObsFpsAck;
     openGlLiveTimerSent_ = openGlLiveTimerSent;
     openGlLiveTimerAck_ = openGlLiveTimerAck;
+    openGlLiveAudioSent_ = openGlLiveAudioSent;
+    openGlLiveAudioAck_ = openGlLiveAudioAck;
 
     if (firstLiveFpsAck) {
         blog(LOG_INFO,
@@ -944,7 +1002,9 @@ void ClatashaHudWindow::refresh()
     PublishOpenGlLiveState(
         trackedGamePid_,
         obsFps_,
-        liveSessionSeconds);
+        liveSessionSeconds,
+        desktopLevel_.load(std::memory_order_relaxed),
+        micLevel_.load(std::memory_order_relaxed));
 #endif
 
     if (++fpsStateRefreshTicks_ >= 2) {
@@ -1008,6 +1068,8 @@ void ClatashaHudWindow::refresh()
         case 24: openGlStageName = "obs-fps-upload-done"; break;
         case 25: openGlStageName = "timer-upload-entry"; break;
         case 26: openGlStageName = "timer-upload-done"; break;
+        case 27: openGlStageName = "audio-upload-entry"; break;
+        case 28: openGlStageName = "audio-upload-done"; break;
         case 30: openGlStageName = "viewport-ready"; break;
         case 40: openGlStageName = "state-captured"; break;
         case 50: openGlStageName = "overlay-state"; break;
@@ -1018,7 +1080,7 @@ void ClatashaHudWindow::refresh()
         }
 
         blog(LOG_INFO,
-             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s ogl_draw=%s draws=%llu ogl_render=%s ogl_stage=%d(%s) ogl_fps_tx=%d ogl_fps_rx=%d ogl_obs_tx=%d ogl_obs_rx=%d ogl_timer_tx=%d ogl_timer_rx=%d",
+             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s ogl_draw=%s draws=%llu ogl_render=%s ogl_stage=%d(%s) ogl_fps_tx=%d ogl_fps_rx=%d ogl_obs_tx=%d ogl_obs_rx=%d ogl_timer_tx=%d ogl_timer_rx=%d ogl_audio_tx=%d ogl_audio_rx=%d",
              trackedGamePid_,
              helperAlive ? "running" : "stopped",
              gameFpsValid_ ? QString::number(gameFps_, 'f', 1).toUtf8().constData() : "--",
@@ -1037,7 +1099,9 @@ void ClatashaHudWindow::refresh()
              openGlLiveObsFpsSent_,
              openGlLiveObsFpsAck_,
              openGlLiveTimerSent_,
-             openGlLiveTimerAck_);
+             openGlLiveTimerAck_,
+             openGlLiveAudioSent_,
+             openGlLiveAudioAck_);
     }
 
     if (++audioRefreshTicks_ >= 20) {
