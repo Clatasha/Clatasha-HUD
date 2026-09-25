@@ -984,7 +984,9 @@ void UpdateLiveObsFpsTexture()
             0,
             0);
     const LONG receivedObsFps =
-        (static_cast<unsigned LONG>(packedLiveFps) >> 16) & 0xFFFF;
+        static_cast<LONG>(
+            (static_cast<std::uint32_t>(packedLiveFps) >> 16) &
+            0xFFFFu);
     if (receivedObsFps <= 0)
         return;
 
