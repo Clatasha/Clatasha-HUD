@@ -6,6 +6,7 @@
 #include <detours.h>
 #include <GL/gl.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <cwchar>
 #include <vector>
@@ -13,7 +14,7 @@
 namespace {
 
 constexpr std::uint32_t kSharedMagic = 0x4C474F43; // "COGL"
-constexpr std::uint32_t kSharedVersion = 2;
+constexpr std::uint32_t kSharedVersion = 3;
 
 enum HookBits : LONG {
     HookSwapBuffers = 1 << 0,
@@ -34,6 +35,8 @@ struct alignas(8) OpenGlPresentShared {
     volatile LONG reservedControl;
     volatile LONG64 drawCount;
     volatile LONG64 lastDrawTick;
+    volatile LONG renderMode; // 0 = idle, 1 = modern shader, 2 = fallback marker
+    volatile LONG renderReserved;
 };
 
 using SwapBuffersFn = BOOL (WINAPI *)(HDC);
@@ -342,20 +345,242 @@ bool BuildStaticHudPixels()
     return true;
 }
 
-bool EnsureHudTexture()
-{
-    const HGLRC currentContext = wglGetCurrentContext();
-    if (!currentContext)
-        return false;
+using GlSizePtr = std::ptrdiff_t;
 
-    if (g_hudTexture != 0 &&
-        g_hudTextureContext == currentContext) {
-        return true;
+#ifndef GL_ARRAY_BUFFER
+#define GL_ARRAY_BUFFER 0x8892
+#endif
+#ifndef GL_ARRAY_BUFFER_BINDING
+#define GL_ARRAY_BUFFER_BINDING 0x8894
+#endif
+#ifndef GL_STREAM_DRAW
+#define GL_STREAM_DRAW 0x88E0
+#endif
+#ifndef GL_VERTEX_SHADER
+#define GL_VERTEX_SHADER 0x8B31
+#endif
+#ifndef GL_FRAGMENT_SHADER
+#define GL_FRAGMENT_SHADER 0x8B30
+#endif
+#ifndef GL_COMPILE_STATUS
+#define GL_COMPILE_STATUS 0x8B81
+#endif
+#ifndef GL_LINK_STATUS
+#define GL_LINK_STATUS 0x8B82
+#endif
+#ifndef GL_CURRENT_PROGRAM
+#define GL_CURRENT_PROGRAM 0x8B8D
+#endif
+#ifndef GL_ACTIVE_TEXTURE
+#define GL_ACTIVE_TEXTURE 0x84E0
+#endif
+#ifndef GL_TEXTURE0
+#define GL_TEXTURE0 0x84C0
+#endif
+#ifndef GL_VERTEX_ARRAY_BINDING
+#define GL_VERTEX_ARRAY_BINDING 0x85B5
+#endif
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
+using GlCreateShaderFn = GLuint (APIENTRYP)(GLenum);
+using GlShaderSourceFn = void (APIENTRYP)(
+    GLuint, GLsizei, const char *const *, const GLint *);
+using GlCompileShaderFn = void (APIENTRYP)(GLuint);
+using GlGetShaderivFn = void (APIENTRYP)(GLuint, GLenum, GLint *);
+using GlDeleteShaderFn = void (APIENTRYP)(GLuint);
+using GlCreateProgramFn = GLuint (APIENTRYP)();
+using GlAttachShaderFn = void (APIENTRYP)(GLuint, GLuint);
+using GlBindAttribLocationFn = void (APIENTRYP)(GLuint, GLuint, const char *);
+using GlBindFragDataLocationFn = void (APIENTRYP)(GLuint, GLuint, const char *);
+using GlLinkProgramFn = void (APIENTRYP)(GLuint);
+using GlGetProgramivFn = void (APIENTRYP)(GLuint, GLenum, GLint *);
+using GlDeleteProgramFn = void (APIENTRYP)(GLuint);
+using GlUseProgramFn = void (APIENTRYP)(GLuint);
+using GlGetUniformLocationFn = GLint (APIENTRYP)(GLuint, const char *);
+using GlUniform1iFn = void (APIENTRYP)(GLint, GLint);
+using GlGenBuffersFn = void (APIENTRYP)(GLsizei, GLuint *);
+using GlBindBufferFn = void (APIENTRYP)(GLenum, GLuint);
+using GlBufferDataFn = void (APIENTRYP)(
+    GLenum, GlSizePtr, const void *, GLenum);
+using GlGenVertexArraysFn = void (APIENTRYP)(GLsizei, GLuint *);
+using GlBindVertexArrayFn = void (APIENTRYP)(GLuint);
+using GlEnableVertexAttribArrayFn = void (APIENTRYP)(GLuint);
+using GlVertexAttribPointerFn = void (APIENTRYP)(
+    GLuint, GLint, GLenum, GLboolean, GLsizei, const void *);
+using GlActiveTextureFn = void (APIENTRYP)(GLenum);
+
+GlCreateShaderFn g_glCreateShader = nullptr;
+GlShaderSourceFn g_glShaderSource = nullptr;
+GlCompileShaderFn g_glCompileShader = nullptr;
+GlGetShaderivFn g_glGetShaderiv = nullptr;
+GlDeleteShaderFn g_glDeleteShader = nullptr;
+GlCreateProgramFn g_glCreateProgram = nullptr;
+GlAttachShaderFn g_glAttachShader = nullptr;
+GlBindAttribLocationFn g_glBindAttribLocation = nullptr;
+GlBindFragDataLocationFn g_glBindFragDataLocation = nullptr;
+GlLinkProgramFn g_glLinkProgram = nullptr;
+GlGetProgramivFn g_glGetProgramiv = nullptr;
+GlDeleteProgramFn g_glDeleteProgram = nullptr;
+GlUseProgramFn g_glUseProgram = nullptr;
+GlGetUniformLocationFn g_glGetUniformLocation = nullptr;
+GlUniform1iFn g_glUniform1i = nullptr;
+GlGenBuffersFn g_glGenBuffers = nullptr;
+GlBindBufferFn g_glBindBuffer = nullptr;
+GlBufferDataFn g_glBufferData = nullptr;
+GlGenVertexArraysFn g_glGenVertexArrays = nullptr;
+GlBindVertexArrayFn g_glBindVertexArray = nullptr;
+GlEnableVertexAttribArrayFn g_glEnableVertexAttribArray = nullptr;
+GlVertexAttribPointerFn g_glVertexAttribPointer = nullptr;
+GlActiveTextureFn g_glActiveTexture = nullptr;
+
+GLuint g_hudProgram = 0;
+GLuint g_hudVao = 0;
+GLuint g_hudVbo = 0;
+GLint g_hudSampler = -1;
+HGLRC g_modernContext = nullptr;
+bool g_modernLoadFailed = false;
+
+void *LoadGlProc(const char *name)
+{
+    void *proc =
+        reinterpret_cast<void *>(wglGetProcAddress(name));
+
+    if (!proc ||
+        proc == reinterpret_cast<void *>(1) ||
+        proc == reinterpret_cast<void *>(2) ||
+        proc == reinterpret_cast<void *>(3) ||
+        proc == reinterpret_cast<void *>(-1)) {
+        HMODULE gl = GetModuleHandleW(L"opengl32.dll");
+        proc = gl
+            ? reinterpret_cast<void *>(
+                  GetProcAddress(gl, name))
+            : nullptr;
     }
 
-    g_hudTexture = 0;
-    g_hudTextureContext = currentContext;
+    return proc;
+}
 
+template<typename T>
+bool LoadProc(T &target, const char *name)
+{
+    target = reinterpret_cast<T>(LoadGlProc(name));
+    return target != nullptr;
+}
+
+bool LoadModernGl()
+{
+    return
+        LoadProc(g_glCreateShader, "glCreateShader") &&
+        LoadProc(g_glShaderSource, "glShaderSource") &&
+        LoadProc(g_glCompileShader, "glCompileShader") &&
+        LoadProc(g_glGetShaderiv, "glGetShaderiv") &&
+        LoadProc(g_glDeleteShader, "glDeleteShader") &&
+        LoadProc(g_glCreateProgram, "glCreateProgram") &&
+        LoadProc(g_glAttachShader, "glAttachShader") &&
+        LoadProc(g_glBindAttribLocation, "glBindAttribLocation") &&
+        LoadProc(g_glBindFragDataLocation, "glBindFragDataLocation") &&
+        LoadProc(g_glLinkProgram, "glLinkProgram") &&
+        LoadProc(g_glGetProgramiv, "glGetProgramiv") &&
+        LoadProc(g_glDeleteProgram, "glDeleteProgram") &&
+        LoadProc(g_glUseProgram, "glUseProgram") &&
+        LoadProc(g_glGetUniformLocation, "glGetUniformLocation") &&
+        LoadProc(g_glUniform1i, "glUniform1i") &&
+        LoadProc(g_glGenBuffers, "glGenBuffers") &&
+        LoadProc(g_glBindBuffer, "glBindBuffer") &&
+        LoadProc(g_glBufferData, "glBufferData") &&
+        LoadProc(g_glGenVertexArrays, "glGenVertexArrays") &&
+        LoadProc(g_glBindVertexArray, "glBindVertexArray") &&
+        LoadProc(g_glEnableVertexAttribArray, "glEnableVertexAttribArray") &&
+        LoadProc(g_glVertexAttribPointer, "glVertexAttribPointer") &&
+        LoadProc(g_glActiveTexture, "glActiveTexture");
+}
+
+GLuint CompileShader(GLenum type, const char *source)
+{
+    GLuint shader = g_glCreateShader(type);
+    if (!shader)
+        return 0;
+
+    g_glShaderSource(shader, 1, &source, nullptr);
+    g_glCompileShader(shader);
+
+    GLint compiled = GL_FALSE;
+    g_glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+    if (compiled != GL_TRUE) {
+        g_glDeleteShader(shader);
+        return 0;
+    }
+
+    return shader;
+}
+
+bool CreateHudProgram()
+{
+    static const char *vertexSource =
+        "#version 150 core\n"
+        "in vec2 aPos;\n"
+        "in vec2 aUv;\n"
+        "out vec2 vUv;\n"
+        "void main() {\n"
+        "  gl_Position = vec4(aPos, 0.0, 1.0);\n"
+        "  vUv = aUv;\n"
+        "}\n";
+
+    static const char *fragmentSource =
+        "#version 150 core\n"
+        "uniform sampler2D uTex;\n"
+        "in vec2 vUv;\n"
+        "out vec4 fragColor;\n"
+        "void main() {\n"
+        "  fragColor = texture(uTex, vUv);\n"
+        "}\n";
+
+    const GLuint vertex =
+        CompileShader(GL_VERTEX_SHADER, vertexSource);
+    const GLuint fragment =
+        CompileShader(GL_FRAGMENT_SHADER, fragmentSource);
+    if (!vertex || !fragment) {
+        if (vertex)
+            g_glDeleteShader(vertex);
+        if (fragment)
+            g_glDeleteShader(fragment);
+        return false;
+    }
+
+    g_hudProgram = g_glCreateProgram();
+    if (!g_hudProgram) {
+        g_glDeleteShader(vertex);
+        g_glDeleteShader(fragment);
+        return false;
+    }
+
+    g_glAttachShader(g_hudProgram, vertex);
+    g_glAttachShader(g_hudProgram, fragment);
+    g_glBindAttribLocation(g_hudProgram, 0, "aPos");
+    g_glBindAttribLocation(g_hudProgram, 1, "aUv");
+    g_glBindFragDataLocation(g_hudProgram, 0, "fragColor");
+    g_glLinkProgram(g_hudProgram);
+
+    g_glDeleteShader(vertex);
+    g_glDeleteShader(fragment);
+
+    GLint linked = GL_FALSE;
+    g_glGetProgramiv(g_hudProgram, GL_LINK_STATUS, &linked);
+    if (linked != GL_TRUE) {
+        g_glDeleteProgram(g_hudProgram);
+        g_hudProgram = 0;
+        return false;
+    }
+
+    g_hudSampler =
+        g_glGetUniformLocation(g_hudProgram, "uTex");
+    return g_hudSampler >= 0;
+}
+
+bool CreateHudTexture()
+{
     if (!BuildStaticHudPixels())
         return false;
 
@@ -365,7 +590,7 @@ bool EnsureHudTexture()
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &oldUnpackAlignment);
 
     glGenTextures(1, &g_hudTexture);
-    if (g_hudTexture == 0)
+    if (!g_hudTexture)
         return false;
 
     glBindTexture(GL_TEXTURE_2D, g_hudTexture);
@@ -374,9 +599,9 @@ bool EnsureHudTexture()
     glTexParameteri(
         GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(
-        GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(
-        GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+        GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(
         GL_TEXTURE_2D,
@@ -399,76 +624,270 @@ bool EnsureHudTexture()
     return true;
 }
 
-void DrawStaticHud(HDC dc)
+bool EnsureModernHudRenderer()
 {
-    if (!ShouldDrawOverlay(dc) || !EnsureHudTexture())
+    const HGLRC context = wglGetCurrentContext();
+    if (!context)
+        return false;
+
+    if (g_modernContext == context &&
+        g_hudProgram &&
+        g_hudVao &&
+        g_hudVbo &&
+        g_hudTexture) {
+        return true;
+    }
+
+    g_modernContext = context;
+    g_modernLoadFailed = false;
+    g_hudTexture = 0;
+    g_hudProgram = 0;
+    g_hudVao = 0;
+    g_hudVbo = 0;
+    g_hudSampler = -1;
+
+    if (!LoadModernGl() ||
+        !CreateHudProgram() ||
+        !CreateHudTexture()) {
+        g_modernLoadFailed = true;
+        return false;
+    }
+
+    GLint oldVao = 0;
+    GLint oldBuffer = 0;
+    GLint oldProgram = 0;
+
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &oldVao);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &oldBuffer);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &oldProgram);
+
+    g_glGenVertexArrays(1, &g_hudVao);
+    g_glGenBuffers(1, &g_hudVbo);
+    if (!g_hudVao || !g_hudVbo) {
+        g_modernLoadFailed = true;
+        return false;
+    }
+
+    g_glBindVertexArray(g_hudVao);
+    g_glBindBuffer(GL_ARRAY_BUFFER, g_hudVbo);
+    g_glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GlSizePtr>(6 * 4 * sizeof(GLfloat)),
+        nullptr,
+        GL_STREAM_DRAW);
+
+    g_glEnableVertexAttribArray(0);
+    g_glVertexAttribPointer(
+        0, 2, GL_FLOAT, GL_FALSE,
+        4 * sizeof(GLfloat),
+        reinterpret_cast<const void *>(0));
+
+    g_glEnableVertexAttribArray(1);
+    g_glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE,
+        4 * sizeof(GLfloat),
+        reinterpret_cast<const void *>(
+            2 * sizeof(GLfloat)));
+
+    g_glUseProgram(g_hudProgram);
+    g_glUniform1i(g_hudSampler, 0);
+
+    g_glUseProgram(static_cast<GLuint>(oldProgram));
+    g_glBindBuffer(
+        GL_ARRAY_BUFFER,
+        static_cast<GLuint>(oldBuffer));
+    g_glBindVertexArray(
+        static_cast<GLuint>(oldVao));
+
+    return true;
+}
+
+void DrawFallbackMarker()
+{
+    GLint viewport[4] = {};
+    GLint oldScissor[4] = {};
+    GLfloat oldClearColor[4] = {};
+    GLboolean oldColorMask[4] = {};
+
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    if (viewport[2] < 64 || viewport[3] < 64)
         return;
 
-    GLint viewport[4] = {};
-    GLint oldMatrixMode = GL_MODELVIEW;
-    glGetIntegerv(GL_VIEWPORT, viewport);
-    glGetIntegerv(GL_MATRIX_MODE, &oldMatrixMode);
+    const GLboolean scissorWasEnabled =
+        glIsEnabled(GL_SCISSOR_TEST);
 
+    glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, oldClearColor);
+    glGetBooleanv(GL_COLOR_WRITEMASK, oldColorMask);
+
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(
+        viewport[0] + viewport[2] - 30,
+        viewport[1] + viewport[3] - 30,
+        18,
+        18);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0.10f, 1.0f, 0.20f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glColorMask(
+        oldColorMask[0], oldColorMask[1],
+        oldColorMask[2], oldColorMask[3]);
+    glClearColor(
+        oldClearColor[0], oldClearColor[1],
+        oldClearColor[2], oldClearColor[3]);
+    glScissor(
+        oldScissor[0], oldScissor[1],
+        oldScissor[2], oldScissor[3]);
+
+    if (!scissorWasEnabled)
+        glDisable(GL_SCISSOR_TEST);
+}
+
+void DrawStaticHud(HDC dc)
+{
+    if (!ShouldDrawOverlay(dc))
+        return;
+
+    if (!EnsureModernHudRenderer()) {
+        InterlockedExchange(&g_shared->renderMode, 2);
+        DrawFallbackMarker();
+
+        InterlockedIncrement64(&g_shared->drawCount);
+        InterlockedExchange64(
+            &g_shared->lastDrawTick,
+            static_cast<LONG64>(GetTickCount64()));
+        return;
+    }
+
+    InterlockedExchange(&g_shared->renderMode, 1);
+
+    GLint viewport[4] = {};
+    glGetIntegerv(GL_VIEWPORT, viewport);
     if (viewport[2] < kHudWidth + kHudMargin * 2 ||
         viewport[3] < kHudHeight + kHudMargin * 2) {
         return;
     }
 
-    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    const GLfloat leftPx =
+        static_cast<GLfloat>(
+            viewport[2] - kHudWidth - kHudMargin);
+    const GLfloat rightPx =
+        leftPx + static_cast<GLfloat>(kHudWidth);
+    const GLfloat topPx =
+        static_cast<GLfloat>(
+            viewport[3] - kHudMargin);
+    const GLfloat bottomPx =
+        topPx - static_cast<GLfloat>(kHudHeight);
+
+    const auto ndcX = [viewport](GLfloat px) {
+        return px * 2.0f /
+                   static_cast<GLfloat>(viewport[2]) -
+               1.0f;
+    };
+    const auto ndcY = [viewport](GLfloat py) {
+        return py * 2.0f /
+                   static_cast<GLfloat>(viewport[3]) -
+               1.0f;
+    };
+
+    const GLfloat left = ndcX(leftPx);
+    const GLfloat right = ndcX(rightPx);
+    const GLfloat top = ndcY(topPx);
+    const GLfloat bottom = ndcY(bottomPx);
+
+    const GLfloat vertices[] = {
+        left,  bottom, 0.0f, 1.0f,
+        right, bottom, 1.0f, 1.0f,
+        right, top,    1.0f, 0.0f,
+        left,  bottom, 0.0f, 1.0f,
+        right, top,    1.0f, 0.0f,
+        left,  top,    0.0f, 0.0f,
+    };
+
+    GLint oldProgram = 0;
+    GLint oldVao = 0;
+    GLint oldBuffer = 0;
+    GLint oldActiveTexture = GL_TEXTURE0;
+    GLint oldTexture0 = 0;
+    GLint oldBlendSrc = GL_ONE;
+    GLint oldBlendDst = GL_ZERO;
+    GLboolean oldColorMask[4] = {};
+
+    glGetIntegerv(GL_CURRENT_PROGRAM, &oldProgram);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &oldVao);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &oldBuffer);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &oldActiveTexture);
+    glGetBooleanv(GL_COLOR_WRITEMASK, oldColorMask);
+
+    const GLboolean blendWasEnabled =
+        glIsEnabled(GL_BLEND);
+    const GLboolean depthWasEnabled =
+        glIsEnabled(GL_DEPTH_TEST);
+    const GLboolean cullWasEnabled =
+        glIsEnabled(GL_CULL_FACE);
+    const GLboolean scissorWasEnabled =
+        glIsEnabled(GL_SCISSOR_TEST);
+    const GLboolean stencilWasEnabled =
+        glIsEnabled(GL_STENCIL_TEST);
+
+    glGetIntegerv(GL_BLEND_SRC, &oldBlendSrc);
+    glGetIntegerv(GL_BLEND_DST, &oldBlendDst);
+
+    g_glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture0);
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
-    glDisable(GL_LIGHTING);
     glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_STENCIL_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_TEXTURE_2D);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+    g_glUseProgram(g_hudProgram);
+    g_glBindVertexArray(g_hudVao);
+    g_glBindBuffer(GL_ARRAY_BUFFER, g_hudVbo);
+    g_glBufferData(
+        GL_ARRAY_BUFFER,
+        static_cast<GlSizePtr>(sizeof(vertices)),
+        vertices,
+        GL_STREAM_DRAW);
+
     glBindTexture(GL_TEXTURE_2D, g_hudTexture);
-    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    g_glUniform1i(g_hudSampler, 0);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
 
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    glOrtho(
-        0.0,
-        static_cast<GLdouble>(viewport[2]),
-        0.0,
-        static_cast<GLdouble>(viewport[3]),
-        -1.0,
-        1.0);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        static_cast<GLuint>(oldTexture0));
+    g_glBindBuffer(
+        GL_ARRAY_BUFFER,
+        static_cast<GLuint>(oldBuffer));
+    g_glBindVertexArray(
+        static_cast<GLuint>(oldVao));
+    g_glUseProgram(
+        static_cast<GLuint>(oldProgram));
+    g_glActiveTexture(
+        static_cast<GLenum>(oldActiveTexture));
 
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
+    glBlendFunc(
+        static_cast<GLenum>(oldBlendSrc),
+        static_cast<GLenum>(oldBlendDst));
+    glColorMask(
+        oldColorMask[0], oldColorMask[1],
+        oldColorMask[2], oldColorMask[3]);
 
-    const GLfloat left =
-        static_cast<GLfloat>(
-            viewport[2] - kHudWidth - kHudMargin);
-    const GLfloat right =
-        left + static_cast<GLfloat>(kHudWidth);
-    const GLfloat top =
-        static_cast<GLfloat>(
-            viewport[3] - kHudMargin);
-    const GLfloat bottom =
-        top - static_cast<GLfloat>(kHudHeight);
-
-    glBegin(GL_QUADS);
-    glTexCoord2f(0.0f, 1.0f);
-    glVertex2f(left, bottom);
-    glTexCoord2f(1.0f, 1.0f);
-    glVertex2f(right, bottom);
-    glTexCoord2f(1.0f, 0.0f);
-    glVertex2f(right, top);
-    glTexCoord2f(0.0f, 0.0f);
-    glVertex2f(left, top);
-    glEnd();
-
-    glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(oldMatrixMode);
-
-    glPopAttrib();
+    if (!blendWasEnabled)
+        glDisable(GL_BLEND);
+    if (depthWasEnabled)
+        glEnable(GL_DEPTH_TEST);
+    if (cullWasEnabled)
+        glEnable(GL_CULL_FACE);
+    if (scissorWasEnabled)
+        glEnable(GL_SCISSOR_TEST);
+    if (stencilWasEnabled)
+        glEnable(GL_STENCIL_TEST);
 
     InterlockedIncrement64(&g_shared->drawCount);
     InterlockedExchange64(
