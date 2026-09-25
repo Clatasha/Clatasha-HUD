@@ -94,6 +94,7 @@ private:
     bool openGlDrawArmed_ = false;
     quint64 openGlDrawCount_ = 0;
     int openGlRenderMode_ = 0;
+    int openGlDrawStage_ = 0;
     bool gameFullscreen_ = false;
     int rendererMissSamples_ = 0;
     int gameTargetRefreshTicks_ = 0;
