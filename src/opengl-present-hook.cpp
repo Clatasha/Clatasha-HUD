@@ -132,7 +132,23 @@ bool ShouldDrawOverlay(HDC dc)
     if (wglGetCurrentDC() != dc)
         return false;
 
-    return IsFullscreenWindow(WindowFromDC(dc));
+    // The helper owns fullscreen qualification and applies hysteresis before
+    // arming drawMarker. Do not repeat the fragile monitor-geometry test here;
+    // only confirm that this OpenGL surface belongs to the foreground process.
+    const HWND hwnd = WindowFromDC(dc);
+    const HWND foreground = GetForegroundWindow();
+    if (!hwnd || !foreground ||
+        !IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+        return false;
+    }
+
+    DWORD windowPid = 0;
+    DWORD foregroundPid = 0;
+    GetWindowThreadProcessId(hwnd, &windowPid);
+    GetWindowThreadProcessId(foreground, &foregroundPid);
+
+    const DWORD selfPid = GetCurrentProcessId();
+    return windowPid == selfPid && foregroundPid == selfPid;
 }
 
 void DrawMeter(HDC dc, int x, int y)
