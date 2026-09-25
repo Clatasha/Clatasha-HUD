@@ -616,6 +616,7 @@ void ClatashaHudWindow::updateForegroundGame()
     openGlLiveAudioAck_ = 0;
     openGlLiveStatusSent_ = 0;
     openGlLiveStatusAck_ = 0;
+    obsHookPreexisting_ = -1;
     gameFullscreen_ = false;
     rendererMissSamples_ = 0;
     update();
@@ -700,6 +701,7 @@ void ClatashaHudWindow::readFpsState()
     int openGlLiveAudioAck = 0;
     int openGlLiveStatusSent = 0;
     int openGlLiveStatusAck = 0;
+    int obsHookPreexisting = -1;
     bool fullscreen = false;
 
     while (!file.atEnd()) {
@@ -820,6 +822,17 @@ void ClatashaHudWindow::readFpsState()
             if (liveStatusAckOk)
                 openGlLiveStatusAck = parsedLiveStatusAck;
         }
+        if (fields.size() >= 21) {
+            bool hookOrderOk = false;
+            const int parsedHookOrder =
+                fields.at(20).toInt(&hookOrderOk);
+            if (hookOrderOk &&
+                (parsedHookOrder == 0 ||
+                 parsedHookOrder == 1)) {
+                obsHookPreexisting =
+                    parsedHookOrder;
+            }
+        }
 
         if (fpsOk && std::isfinite(value) && value > 0.0 && value < 2000.0) {
             fps = value;
@@ -854,6 +867,25 @@ void ClatashaHudWindow::readFpsState()
             blog(LOG_INFO,
                  "[Clatasha HUD] Renderer target PID %u returned to desktop/windowed mode",
                  trackedGamePid_);
+        }
+    }
+
+    if (obsHookPreexisting != -1 &&
+        obsHookPreexisting !=
+            obsHookPreexisting_) {
+        obsHookPreexisting_ =
+            obsHookPreexisting;
+
+        if (obsHookPreexisting_ == 0) {
+            blog(
+                LOG_INFO,
+                "[Clatasha HUD] Capture hook order PID %u: clatasha-first (Game Capture can exclude HUD)",
+                trackedGamePid_);
+        } else {
+            blog(
+                LOG_WARNING,
+                "[Clatasha HUD] Capture hook order PID %u: obs-first (restart the game for HUD capture exclusion)",
+                trackedGamePid_);
         }
     }
 
