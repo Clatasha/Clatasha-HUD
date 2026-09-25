@@ -162,34 +162,6 @@ bool ShouldDrawOverlay(HDC dc)
     return windowPid == selfPid && foregroundPid == selfPid;
 }
 
-void DrawMeter(HDC dc, int x, int y, float level)
-{
-    constexpr int segments = 6;
-    constexpr int segmentHeight = 4;
-    constexpr int gap = 1;
-
-    const float clamped =
-        level < 0.0f ? 0.0f : (level > 1.0f ? 1.0f : level);
-    const int activeSegments =
-        static_cast<int>(std::ceil(clamped * segments));
-
-    HBRUSH active = CreateSolidBrush(RGB(31, 218, 102));
-    HBRUSH inactive = CreateSolidBrush(RGB(49, 55, 59));
-
-    for (int i = 0; i < segments; ++i) {
-        const int sy = y + 29 - segmentHeight -
-                       i * (segmentHeight + gap);
-        RECT r{x, sy, x + 3, sy + segmentHeight};
-        FillRect(
-            dc,
-            &r,
-            i < activeSegments ? active : inactive);
-    }
-
-    DeleteObject(active);
-    DeleteObject(inactive);
-}
-
 bool OpenHudTelemetry()
 {
     if (g_hudTelemetry)
@@ -260,306 +232,6 @@ bool ReadHudTelemetry(clatasha::HudTelemetryShared &snapshot)
     }
 
     return false;
-}
-
-void FormatElapsed(
-    std::int64_t elapsedMs,
-    wchar_t (&buffer)[16])
-{
-    if (elapsedMs < 0)
-        elapsedMs = 0;
-
-    const std::int64_t totalSeconds = elapsedMs / 1000;
-    const std::int64_t hours = totalSeconds / 3600;
-    const std::int64_t minutes = (totalSeconds % 3600) / 60;
-    const std::int64_t seconds = totalSeconds % 60;
-
-    swprintf_s(
-        buffer,
-        L"%lld:%02lld:%02lld",
-        static_cast<long long>(hours),
-        static_cast<long long>(minutes),
-        static_cast<long long>(seconds));
-}
-
-bool BuildHudPixels(
-    const clatasha::HudTelemetryShared *telemetry)
-{
-    HDC dc = CreateCompatibleDC(nullptr);
-    if (!dc)
-        return false;
-
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = kHudWidth;
-    info.bmiHeader.biHeight = -kHudHeight;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-
-    void *bits = nullptr;
-    HBITMAP bitmap = CreateDIBSection(
-        dc,
-        &info,
-        DIB_RGB_COLORS,
-        &bits,
-        nullptr,
-        0);
-    if (!bitmap || !bits) {
-        if (bitmap)
-            DeleteObject(bitmap);
-        DeleteDC(dc);
-        return false;
-    }
-
-    const bool gameFpsValid =
-        telemetry ? telemetry->gameFpsValid != 0 : true;
-    const int gameFps =
-        telemetry
-            ? static_cast<int>(std::lround(telemetry->gameFps))
-            : 60;
-    const int obsFps =
-        telemetry
-            ? static_cast<int>(std::lround(telemetry->obsFps))
-            : 60;
-    const float desktopLevel =
-        telemetry ? telemetry->desktopLevel : 0.65f;
-    const float micLevel =
-        telemetry ? telemetry->micLevel : 0.45f;
-    const bool sessionActive =
-        telemetry ? telemetry->sessionActive != 0 : false;
-    const int opacityPercent =
-        telemetry
-            ? std::clamp(
-                  static_cast<int>(telemetry->opacityPercent),
-                  10,
-                  100)
-            : 100;
-
-    wchar_t fpsText[16] = {};
-    if (gameFpsValid)
-        swprintf_s(fpsText, L"%d", std::max(0, gameFps));
-    else
-        wcscpy_s(fpsText, L"--");
-
-    wchar_t obsText[16] = {};
-    swprintf_s(obsText, L"/%d", std::max(0, obsFps));
-
-    wchar_t timerText[16] = {};
-    FormatElapsed(
-        telemetry ? telemetry->elapsedMs : 754000,
-        timerText);
-
-    wchar_t diskText[16] = L"123 GB";
-    if (telemetry && telemetry->diskText[0] != L'\0') {
-        wcsncpy_s(
-            diskText,
-            telemetry->diskText,
-            _TRUNCATE);
-    }
-
-    HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
-    ZeroMemory(
-        bits,
-        static_cast<SIZE_T>(kHudWidth) *
-            static_cast<SIZE_T>(kHudHeight) * 4);
-
-    HPEN borderPen =
-        CreatePen(PS_SOLID, 1, RGB(100, 109, 116));
-    HBRUSH panelBrush =
-        CreateSolidBrush(RGB(8, 10, 12));
-    HGDIOBJ oldPen = SelectObject(dc, borderPen);
-    HGDIOBJ oldBrush = SelectObject(dc, panelBrush);
-    RoundRect(dc, 0, 0, kHudWidth, kHudHeight, 8, 8);
-
-    DrawMeter(dc, 5, 5, desktopLevel);
-    DrawMeter(dc, 17, 5, micLevel);
-
-    SetBkMode(dc, TRANSPARENT);
-
-    HFONT fpsFont = CreateFontW(
-        -29, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    HFONT smallBold = CreateFontW(
-        -12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    HFONT tinyFont = CreateFontW(
-        -9, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-
-    HFONT oldFont =
-        static_cast<HFONT>(SelectObject(dc, fpsFont));
-    SetTextColor(
-        dc,
-        sessionActive
-            ? RGB(232, 24, 43)
-            : RGB(45, 143, 255));
-    RECT fpsRect{22, -2, 75, 34};
-    DrawTextW(
-        dc,
-        fpsText,
-        -1,
-        &fpsRect,
-        DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-
-    SelectObject(dc, smallBold);
-    SetTextColor(dc, RGB(165, 171, 176));
-    RECT obsRect{74, 3, 103, 25};
-    DrawTextW(
-        dc,
-        obsText,
-        -1,
-        &obsRect,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    HBRUSH badgeBrush =
-        CreateSolidBrush(RGB(22, 27, 32));
-    HPEN badgePen =
-        CreatePen(PS_SOLID, 1, RGB(96, 106, 116));
-    SelectObject(dc, badgeBrush);
-    SelectObject(dc, badgePen);
-    RoundRect(dc, 102, 2, 126, 13, 4, 4);
-
-    SelectObject(dc, tinyFont);
-    SetTextColor(dc, RGB(210, 216, 221));
-    RECT oglRect{102, 2, 126, 13};
-    DrawTextW(
-        dc,
-        L"OGL",
-        -1,
-        &oglRect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    SetTextColor(dc, RGB(205, 209, 212));
-    RECT timerRect{23, 28, 92, 44};
-    DrawTextW(
-        dc,
-        timerText,
-        -1,
-        &timerRect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    if (sessionActive) {
-        HPEN activePen =
-            CreatePen(PS_SOLID, 2, RGB(226, 25, 47));
-        SelectObject(dc, activePen);
-        SelectObject(dc, GetStockObject(NULL_BRUSH));
-        Arc(dc, 101, 15, 119, 33, 110, 15, 117, 30);
-        DeleteObject(activePen);
-    } else {
-        HBRUSH dotBrush =
-            CreateSolidBrush(RGB(158, 164, 169));
-        SelectObject(dc, dotBrush);
-        SelectObject(dc, GetStockObject(NULL_PEN));
-        Ellipse(dc, 102, 22, 106, 26);
-        Ellipse(dc, 108, 22, 112, 26);
-        Ellipse(dc, 114, 22, 118, 26);
-        DeleteObject(dotBrush);
-    }
-
-    SetTextColor(dc, RGB(165, 171, 176));
-    RECT diskRect{94, 36, 135, 49};
-    DrawTextW(
-        dc,
-        diskText,
-        -1,
-        &diskRect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    HPEN iconPen =
-        CreatePen(PS_SOLID, 1, RGB(174, 181, 187));
-    SelectObject(dc, iconPen);
-    SelectObject(dc, GetStockObject(NULL_BRUSH));
-    Rectangle(dc, 3, 38, 10, 43);
-    MoveToEx(dc, 6, 43, nullptr);
-    LineTo(dc, 6, 46);
-    MoveToEx(dc, 4, 46, nullptr);
-    LineTo(dc, 9, 46);
-
-    RoundRect(dc, 15, 37, 19, 43, 3, 3);
-    Arc(dc, 14, 39, 20, 45, 14, 41, 20, 41);
-    MoveToEx(dc, 17, 44, nullptr);
-    LineTo(dc, 17, 47);
-
-    HBRUSH logoBrush =
-        CreateSolidBrush(RGB(240, 243, 245));
-    SelectObject(dc, logoBrush);
-    SelectObject(dc, GetStockObject(NULL_PEN));
-    Ellipse(dc, 128, 2, 143, 17);
-
-    SelectObject(dc, smallBold);
-    SetTextColor(dc, RGB(18, 22, 26));
-    RECT logoRect{128, 1, 143, 18};
-    DrawTextW(
-        dc,
-        L"C",
-        -1,
-        &logoRect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    const auto *source =
-        static_cast<const std::uint8_t *>(bits);
-    g_hudPixels.resize(
-        static_cast<size_t>(kHudWidth) *
-        static_cast<size_t>(kHudHeight) * 4);
-
-    for (int y = 0; y < kHudHeight; ++y) {
-        for (int x = 0; x < kHudWidth; ++x) {
-            const size_t index =
-                (static_cast<size_t>(y) * kHudWidth + x) * 4;
-            const std::uint8_t b = source[index + 0];
-            const std::uint8_t g = source[index + 1];
-            const std::uint8_t r = source[index + 2];
-
-            g_hudPixels[index + 0] = r;
-            g_hudPixels[index + 1] = g;
-            g_hudPixels[index + 2] = b;
-
-            int alpha = 255;
-            if (r == 0 && g == 0 && b == 0)
-                alpha = 0;
-            else if (r <= 14 && g <= 16 && b <= 18)
-                alpha = 238;
-
-            alpha = alpha * opacityPercent / 100;
-            g_hudPixels[index + 3] =
-                static_cast<std::uint8_t>(
-                    std::clamp(alpha, 0, 255));
-        }
-    }
-
-    if (telemetry) {
-        g_hudLocation =
-            std::clamp(
-                static_cast<std::int32_t>(telemetry->location),
-                static_cast<std::int32_t>(clatasha::HudTopLeft),
-                static_cast<std::int32_t>(clatasha::HudBottomRight));
-    }
-
-    SelectObject(dc, oldFont);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldBitmap);
-
-    DeleteObject(iconPen);
-    DeleteObject(logoBrush);
-    DeleteObject(badgePen);
-    DeleteObject(badgeBrush);
-    DeleteObject(tinyFont);
-    DeleteObject(smallBold);
-    DeleteObject(fpsFont);
-    DeleteObject(panelBrush);
-    DeleteObject(borderPen);
-    DeleteObject(bitmap);
-    DeleteDC(dc);
-
-    return true;
 }
 
 using GlSizePtr = std::ptrdiff_t;
@@ -798,8 +470,9 @@ bool CreateHudProgram()
 
 bool CreateHudTexture()
 {
-    if (!BuildHudPixels(nullptr))
-        return false;
+    g_hudPixels.assign(
+        static_cast<size_t>(clatasha::kHudPixelBytes),
+        0);
 
     GLint oldTexture = 0;
     GLint oldUnpackAlignment = 4;
@@ -859,8 +532,17 @@ void UpdateHudTextureFromTelemetry()
     if (sequence == g_lastHudTelemetrySequence)
         return;
 
-    if (!BuildHudPixels(&snapshot))
+    if (snapshot.pixelWidth != clatasha::kHudPixelWidth ||
+        snapshot.pixelHeight != clatasha::kHudPixelHeight ||
+        snapshot.pixelBytes != clatasha::kHudPixelBytes) {
         return;
+    }
+
+    g_hudLocation =
+        std::clamp(
+            static_cast<std::int32_t>(snapshot.location),
+            static_cast<std::int32_t>(clatasha::HudTopLeft),
+            static_cast<std::int32_t>(clatasha::HudBottomRight));
 
     GLint oldTexture = 0;
     GLint oldUnpackAlignment = 4;
@@ -874,11 +556,11 @@ void UpdateHudTextureFromTelemetry()
         0,
         0,
         0,
-        kHudWidth,
-        kHudHeight,
+        clatasha::kHudPixelWidth,
+        clatasha::kHudPixelHeight,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
-        g_hudPixels.data());
+        snapshot.rgba);
 
     glPixelStorei(
         GL_UNPACK_ALIGNMENT,
