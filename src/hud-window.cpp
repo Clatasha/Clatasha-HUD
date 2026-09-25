@@ -7,7 +7,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <cwchar>
 
 #include <QByteArray>
 
@@ -103,8 +105,10 @@ void PublishOpenGlObsFps(quint32 pid, double obsFps)
                     0);
             const LONG gameBits = packed & 0xFFFF;
             nextPacked =
-                gameBits |
-                ((obsFpsInt & 0xFFFF) << 16);
+                static_cast<LONG>(
+                    static_cast<std::uint32_t>(gameBits) |
+                    (static_cast<std::uint32_t>(
+                         obsFpsInt & 0xFFFF) << 16));
         } while (
             InterlockedCompareExchange(
                 &shared->liveFpsInput,
