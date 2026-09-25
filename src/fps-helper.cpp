@@ -231,7 +231,7 @@ bool IsFullscreenForegroundWindow(HWND hwnd)
 }
 
 constexpr std::uint32_t kOpenGlSharedMagic = 0x4C474F43;
-constexpr std::uint32_t kOpenGlSharedVersion = 3;
+constexpr std::uint32_t kOpenGlSharedVersion = 4;
 
 struct alignas(8) OpenGlPresentShared {
     std::uint32_t magic;
@@ -248,6 +248,8 @@ struct alignas(8) OpenGlPresentShared {
     volatile LONG64 lastDrawTick;
     volatile LONG renderMode;
     volatile LONG liveFpsInput;
+    volatile LONG liveSessionSeconds;
+    volatile LONG liveSessionSecondsAck;
 };
 
 struct OpenGlRateState {
@@ -461,6 +463,8 @@ struct OpenGlSample {
     LONG liveFpsAck = 0;
     LONG liveObsFpsSent = 0;
     LONG liveObsFpsAck = 0;
+    LONG liveTimerSent = 0;
+    LONG liveTimerAck = 0;
 };
 
 OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armOverlay)
@@ -517,7 +521,19 @@ OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armOverlay)
                 0);
         result.liveFpsAck = packedAck & 0xFFFF;
         result.liveObsFpsAck =
-            (packedAck >> 16) & 0xFFFF;
+            static_cast<LONG>(
+                (static_cast<std::uint32_t>(packedAck) >> 16) &
+                0xFFFFu);
+        result.liveTimerSent =
+            InterlockedCompareExchange(
+                &shared->liveSessionSeconds,
+                0,
+                0);
+        result.liveTimerAck =
+            InterlockedCompareExchange(
+                &shared->liveSessionSecondsAck,
+                0,
+                0);
 
         if (state == 1) {
             result.status = "active";
@@ -712,7 +728,7 @@ void WriteStateFile(const std::wstring &path)
     if (_wfopen_s(&fp, tmpPath.c_str(), L"wb") != 0 || !fp)
         return;
 
-    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_hook,ogl_mask,ogl_draw,ogl_draws,ogl_render,ogl_stage,ogl_fps_tx,ogl_fps_rx,ogl_obs_tx,ogl_obs_rx\n");
+    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_hook,ogl_mask,ogl_draw,ogl_draws,ogl_render,ogl_stage,ogl_fps_tx,ogl_fps_rx,ogl_obs_tx,ogl_obs_rx,ogl_timer_tx,ogl_timer_rx\n");
 
     for (const auto &[pid, streams] : gRates) {
         double bestFps = 0.0;
@@ -748,7 +764,7 @@ void WriteStateFile(const std::wstring &path)
             if (pid == foregroundPid && !foregroundRenderer.empty()) {
                 std::fprintf(
                     fp,
-                    "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld,%ld,%ld,%ld,%ld\n",
+                    "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
                     pid,
                     bestFps,
                     foregroundRenderer.c_str(),
@@ -762,7 +778,9 @@ void WriteStateFile(const std::wstring &path)
                     openGlSample.liveFpsSent,
                     openGlSample.liveFpsAck,
                     openGlSample.liveObsFpsSent,
-                    openGlSample.liveObsFpsAck);
+                    openGlSample.liveObsFpsAck,
+                    openGlSample.liveTimerSent,
+                    openGlSample.liveTimerAck);
                 foregroundWritten = true;
             } else {
                 std::fprintf(fp, "%lu,%.3f\n", pid, bestFps);
@@ -778,7 +796,7 @@ void WriteStateFile(const std::wstring &path)
         !foregroundWritten) {
         std::fprintf(
             fp,
-            "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld,%ld,%ld,%ld,%ld\n",
+            "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
             foregroundPid,
             openGlSample.validFps ? openGlSample.fps : 0.0,
             foregroundRenderer.c_str(),
@@ -792,7 +810,9 @@ void WriteStateFile(const std::wstring &path)
             openGlSample.liveFpsSent,
             openGlSample.liveFpsAck,
             openGlSample.liveObsFpsSent,
-            openGlSample.liveObsFpsAck);
+            openGlSample.liveObsFpsAck,
+            openGlSample.liveTimerSent,
+            openGlSample.liveTimerAck);
     }
 
     std::fclose(fp);
