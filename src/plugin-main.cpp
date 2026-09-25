@@ -88,6 +88,11 @@ static bool g_hudWantedVisible = true;
 static bool g_frontendExiting = false;
 static bool g_browserHudOverlaysWantedVisible = true;
 
+#ifdef Q_OS_WIN
+static HANDLE g_displayCaptureSafeEvent = nullptr;
+static bool g_displayCaptureSafeActive = false;
+#endif
+
 namespace {
 
 #ifndef CLATASHA_HUD_VERSION
@@ -2639,6 +2644,71 @@ void enforceGameCaptureHudExclusion()
         nullptr);
 }
 
+#ifdef Q_OS_WIN
+bool findActiveDisplayCapture(
+    void *param,
+    obs_source_t *source)
+{
+    if (!param || !source)
+        return true;
+
+    const char *id =
+        obs_source_get_unversioned_id(source);
+    if (!id ||
+        std::strcmp(id, "monitor_capture") != 0) {
+        return true;
+    }
+
+    if (obs_source_showing(source)) {
+        *static_cast<bool *>(param) = true;
+        return false;
+    }
+
+    return true;
+}
+
+bool activeDisplayCapturePresent()
+{
+    bool active = false;
+    obs_enum_sources(
+        findActiveDisplayCapture,
+        &active);
+    return active;
+}
+
+void updateDisplayCaptureSafeMode()
+{
+    const bool active =
+        activeDisplayCapturePresent();
+
+    if (g_displayCaptureSafeEvent) {
+        if (active)
+            SetEvent(g_displayCaptureSafeEvent);
+        else
+            ResetEvent(g_displayCaptureSafeEvent);
+    }
+
+    if (active ==
+        g_displayCaptureSafeActive) {
+        return;
+    }
+
+    g_displayCaptureSafeActive = active;
+
+    blog(
+        LOG_INFO,
+        "[Clatasha HUD] Display Capture Safe Mode: %s%s",
+        active ? "active" : "inactive",
+        active
+            ? " (injected HUD drawing suppressed)"
+            : "");
+}
+#else
+void updateDisplayCaptureSafeMode()
+{
+}
+#endif
+
 } // namespace
 
 MODULE_EXPORT const char *obs_module_description(void)
@@ -2664,6 +2734,8 @@ static void ensure_hud()
             captureExclusionTicks = 0;
             enforceGameCaptureHudExclusion();
         }
+
+        updateDisplayCaptureSafeMode();
 
         if (!g_hud)
             return;
@@ -4120,6 +4192,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
         g_hudWantedVisible = true;
         ensure_hud();
         enforceGameCaptureHudExclusion();
+        updateDisplayCaptureSafeMode();
         g_hud->show();
         g_hud->positionHud();
         QTimer::singleShot(5000, []() {
@@ -4136,6 +4209,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 
     case OBS_FRONTEND_EVENT_SCENE_CHANGED:
         enforceGameCaptureHudExclusion();
+        updateDisplayCaptureSafeMode();
         applyVideoOverlays(loadOverlayConfigs());
         break;
 
@@ -4164,6 +4238,27 @@ bool obs_module_load(void)
     blog(LOG_INFO, "[Clatasha HUD] Loading plugin");
 
     g_frontendExiting = false;
+#ifdef Q_OS_WIN
+    {
+        wchar_t eventName[96] = {};
+        swprintf_s(
+            eventName,
+            L"Local\\ClatashaHUD_DisplayCaptureSafe_%lu",
+            GetCurrentProcessId());
+        g_displayCaptureSafeEvent =
+            CreateEventW(
+                nullptr,
+                TRUE,
+                FALSE,
+                eventName);
+        if (!g_displayCaptureSafeEvent) {
+            blog(
+                LOG_WARNING,
+                "[Clatasha HUD] Could not create Display Capture Safe Mode event: %lu",
+                GetLastError());
+        }
+    }
+#endif
     loadGameWindowSettings();
     loadCachedUpdateCheck();
     obs_frontend_add_event_callback(on_frontend_event, nullptr);
@@ -4185,6 +4280,14 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
     restoreGameBorderlessWindow();
+#ifdef Q_OS_WIN
+    if (g_displayCaptureSafeEvent) {
+        ResetEvent(g_displayCaptureSafeEvent);
+        CloseHandle(g_displayCaptureSafeEvent);
+        g_displayCaptureSafeEvent = nullptr;
+    }
+    g_displayCaptureSafeActive = false;
+#endif
     g_hudWantedVisible = false;
     g_frontendExiting = true;
 
