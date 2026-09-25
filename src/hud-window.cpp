@@ -17,6 +17,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QImage>
 #include <QPainter>
 #include <QPainterPath>
 #include <QScreen>
@@ -298,6 +299,21 @@ void ClatashaHudWindow::publishHudTelemetry()
         return;
     }
 
+    QImage hudImage(
+        clatasha::kHudPixelWidth,
+        clatasha::kHudPixelHeight,
+        QImage::Format_RGBA8888);
+    hudImage.fill(Qt::transparent);
+
+    {
+        QPainter imagePainter(&hudImage);
+        render(
+            &imagePainter,
+            QPoint(),
+            QRegion(),
+            QWidget::DrawWindowBackground);
+    }
+
     auto *sequence =
         reinterpret_cast<volatile LONG *>(
             &shared->sequence);
@@ -353,6 +369,26 @@ void ClatashaHudWindow::publishHudTelemetry()
             shared->diskText,
             disk.c_str(),
             copyCount);
+    }
+
+    shared->pixelWidth = clatasha::kHudPixelWidth;
+    shared->pixelHeight = clatasha::kHudPixelHeight;
+    shared->pixelBytes = clatasha::kHudPixelBytes;
+
+    if (hudImage.bytesPerLine() ==
+        clatasha::kHudPixelWidth * 4) {
+        std::memcpy(
+            shared->rgba,
+            hudImage.constBits(),
+            clatasha::kHudPixelBytes);
+    } else {
+        for (int y = 0; y < clatasha::kHudPixelHeight; ++y) {
+            std::memcpy(
+                shared->rgba +
+                    y * clatasha::kHudPixelWidth * 4,
+                hudImage.constScanLine(y),
+                clatasha::kHudPixelWidth * 4);
+        }
     }
 
     MemoryBarrier();
