@@ -58,6 +58,7 @@ std::map<DWORD, std::array<std::uint64_t, kPresentStreamCount>> gCounts;
 std::atomic<bool> gStopping{false};
 TRACEHANDLE gSession = 0;
 TRACEHANDLE gTrace = INVALID_PROCESSTRACE_HANDLE;
+HANDLE gDisplayCaptureSafeEvent = nullptr;
 
 struct RateState {
     std::deque<std::pair<ULONGLONG, std::uint64_t>> samples;
@@ -802,6 +803,15 @@ OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armOverlay)
     return result;
 }
 
+bool DisplayCaptureSafeModeActive()
+{
+    return
+        gDisplayCaptureSafeEvent &&
+        WaitForSingleObject(
+            gDisplayCaptureSafeEvent,
+            0) == WAIT_OBJECT_0;
+}
+
 std::string RendererTagForProcess(DWORD pid)
 {
     if (pid == 0)
@@ -881,6 +891,8 @@ void WriteStateFile(const std::wstring &path)
 
     const bool foregroundFullscreen =
         IsFullscreenForegroundWindow(foreground);
+    const bool displayCaptureSafe =
+        DisplayCaptureSafeModeActive();
     const std::string foregroundRenderer =
         RendererTagForProcess(foregroundPid);
 
@@ -900,7 +912,8 @@ void WriteStateFile(const std::wstring &path)
             foregroundPid,
             now,
             rendererUsesInjectedHud &&
-                foregroundFullscreen);
+                foregroundFullscreen &&
+                !displayCaptureSafe);
 
     bool foregroundWritten = false;
     std::map<DWORD, std::array<std::uint64_t, kPresentStreamCount>> counts;
@@ -1054,6 +1067,20 @@ int wmain(int argc, wchar_t **argv)
 
     const std::wstring statePath = argv[1];
     const DWORD parentPid = static_cast<DWORD>(_wtoi(argv[2]));
+
+    {
+        wchar_t eventName[96] = {};
+        swprintf_s(
+            eventName,
+            L"Local\\ClatashaHUD_DisplayCaptureSafe_%lu",
+            parentPid);
+        gDisplayCaptureSafeEvent =
+            OpenEventW(
+                SYNCHRONIZE,
+                FALSE,
+                eventName);
+    }
+
     const std::wstring sessionName =
         L"ClatashaHUD_DXGI_" + std::to_wstring(parentPid);
 
@@ -1098,6 +1125,11 @@ int wmain(int argc, wchar_t **argv)
 
     if (parent)
         CloseHandle(parent);
+
+    if (gDisplayCaptureSafeEvent) {
+        CloseHandle(gDisplayCaptureSafeEvent);
+        gDisplayCaptureSafeEvent = nullptr;
+    }
 
     DeleteFileW(statePath.c_str());
     DeleteFileW((statePath + L".tmp").c_str());
