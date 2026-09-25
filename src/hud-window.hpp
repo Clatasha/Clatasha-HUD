@@ -103,6 +103,8 @@ private:
     int openGlLiveTimerAck_ = 0;
     int openGlLiveAudioSent_ = 0;
     int openGlLiveAudioAck_ = 0;
+    int openGlLiveStatusSent_ = 0;
+    int openGlLiveStatusAck_ = 0;
     bool gameFullscreen_ = false;
     int rendererMissSamples_ = 0;
     int gameTargetRefreshTicks_ = 0;
