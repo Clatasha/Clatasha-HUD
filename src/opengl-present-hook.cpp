@@ -6,6 +6,10 @@
 #include <detours.h>
 #include <GL/gl.h>
 
+#ifndef APIENTRYP
+#define APIENTRYP APIENTRY *
+#endif
+
 #include <cstddef>
 #include <cstdint>
 #include <cwchar>

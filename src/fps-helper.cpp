@@ -732,7 +732,7 @@ void WriteStateFile(const std::wstring &path)
         !foregroundWritten) {
         std::fprintf(
             fp,
-            "%lu,%.3f,%s,%d,%s,%ld,%d,%llu\n",
+            "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld\n",
             foregroundPid,
             openGlSample.validFps ? openGlSample.fps : 0.0,
             foregroundRenderer.c_str(),
