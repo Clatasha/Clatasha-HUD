@@ -59,7 +59,7 @@ if(WIN32)
   )
   target_link_libraries(
     clatasha-opengl-present-hook
-    PRIVATE Detours::Detours opengl32 gdi32
+    PRIVATE Detours::Detours opengl32 gdi32 gdiplus
   )
   set_target_properties(
     clatasha-opengl-present-hook
@@ -68,5 +68,9 @@ if(WIN32)
   install(
     TARGETS clatasha-opengl-present-hook
     RUNTIME DESTINATION "${CMAKE_PROJECT_NAME}/data"
+  )
+  install(
+    FILES "assets/clatasha-hud-logo.png"
+    DESTINATION "${CMAKE_PROJECT_NAME}/data"
   )
 endif()
