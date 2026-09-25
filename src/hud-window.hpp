@@ -105,6 +105,9 @@ private:
     int openGlLiveAudioAck_ = 0;
     int openGlLiveStatusSent_ = 0;
     int openGlLiveStatusAck_ = 0;
+    // -1 unknown, 0 Clatasha injected before OBS graphics-hook,
+    // 1 OBS graphics-hook was already resident.
+    int obsHookPreexisting_ = -1;
     bool gameFullscreen_ = false;
     int rendererMissSamples_ = 0;
     int gameTargetRefreshTicks_ = 0;
