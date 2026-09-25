@@ -2589,6 +2589,56 @@ struct OverlayRow {
     QPushButton *preview = nullptr;
 };
 
+bool configureGameCaptureForHudExclusion(
+    void *,
+    obs_source_t *source)
+{
+    if (!source)
+        return true;
+
+    const char *id =
+        obs_source_get_unversioned_id(source);
+    if (!id ||
+        std::strcmp(id, "game_capture") != 0) {
+        return true;
+    }
+
+    obs_data_t *settings =
+        obs_source_get_settings(source);
+    if (!settings)
+        return true;
+
+    const bool captureOverlays =
+        obs_data_get_bool(
+            settings,
+            "capture_overlays");
+
+    if (captureOverlays) {
+        obs_data_set_bool(
+            settings,
+            "capture_overlays",
+            false);
+        obs_source_update(
+            source,
+            settings);
+
+        blog(
+            LOG_INFO,
+            "[Clatasha HUD] Game Capture '%s': disabled third-party overlay capture for local-only HUD",
+            obs_source_get_name(source));
+    }
+
+    obs_data_release(settings);
+    return true;
+}
+
+void enforceGameCaptureHudExclusion()
+{
+    obs_enum_sources(
+        configureGameCaptureForHudExclusion,
+        nullptr);
+}
+
 } // namespace
 
 MODULE_EXPORT const char *obs_module_description(void)
@@ -2608,6 +2658,12 @@ static void ensure_hud()
     QObject::connect(g_hudWatchdog, &QTimer::timeout, []() {
         trackExternalForegroundWindow();
         maintainGameBorderless();
+
+        static int captureExclusionTicks = 0;
+        if (++captureExclusionTicks >= 8) {
+            captureExclusionTicks = 0;
+            enforceGameCaptureHudExclusion();
+        }
 
         if (!g_hud)
             return;
@@ -4063,6 +4119,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
     case OBS_FRONTEND_EVENT_FINISHED_LOADING:
         g_hudWantedVisible = true;
         ensure_hud();
+        enforceGameCaptureHudExclusion();
         g_hud->show();
         g_hud->positionHud();
         QTimer::singleShot(5000, []() {
@@ -4078,6 +4135,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
         break;
 
     case OBS_FRONTEND_EVENT_SCENE_CHANGED:
+        enforceGameCaptureHudExclusion();
         applyVideoOverlays(loadOverlayConfigs());
         break;
 
