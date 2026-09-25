@@ -681,19 +681,21 @@ std::string RendererTagForProcess(DWORD pid)
 
     CloseHandle(snapshot);
 
-    // Prefer explicit graphics-runtime modules over shared DXGI/kernel pieces.
-    // This is renderer detection only; presentation-hook confirmation comes
-    // later when the API-specific backends are added.
+    // Prefer active modern render runtimes over compatibility/helper
+    // modules. Unity and other engines can load opengl32.dll even when the
+    // actual swap chain is Direct3D 11, so treating OpenGL as higher priority
+    // produces false OGL classifications with an injected hook that never
+    // receives a present.
     if (hasVulkan)
         return "VK";
-    if (hasOpenGl)
-        return "OGL";
     if (hasD3d12)
         return "D12";
     if (hasD3d11)
         return "D11";
     if (hasD3d10)
         return "D10";
+    if (hasOpenGl)
+        return "OGL";
     if (hasD3d9)
         return "D9";
     if (hasDdraw)
