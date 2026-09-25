@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cwchar>
+#include <string>
 #include <vector>
 
 namespace {
