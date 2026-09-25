@@ -331,6 +331,8 @@ void ClatashaHudWindow::updateForegroundGame()
     openGlDrawCount_ = 0;
     openGlRenderMode_ = 0;
     openGlDrawStage_ = 0;
+    openGlLiveFpsSent_ = 0;
+    openGlLiveFpsAck_ = 0;
     gameFullscreen_ = false;
     rendererMissSamples_ = 0;
     update();
@@ -405,6 +407,8 @@ void ClatashaHudWindow::readFpsState()
     quint64 openGlDrawCount = 0;
     int openGlRenderMode = 0;
     int openGlDrawStage = 0;
+    int openGlLiveFpsSent = 0;
+    int openGlLiveFpsAck = 0;
     bool fullscreen = false;
 
     while (!file.atEnd()) {
@@ -454,6 +458,20 @@ void ClatashaHudWindow::readFpsState()
                 fields.at(9).toInt(&drawStageOk);
             if (drawStageOk)
                 openGlDrawStage = parsedDrawStage;
+        }
+        if (fields.size() >= 11) {
+            bool liveFpsSentOk = false;
+            const int parsedLiveFpsSent =
+                fields.at(10).toInt(&liveFpsSentOk);
+            if (liveFpsSentOk)
+                openGlLiveFpsSent = parsedLiveFpsSent;
+        }
+        if (fields.size() >= 12) {
+            bool liveFpsAckOk = false;
+            const int parsedLiveFpsAck =
+                fields.at(11).toInt(&liveFpsAckOk);
+            if (liveFpsAckOk)
+                openGlLiveFpsAck = parsedLiveFpsAck;
         }
 
         if (fpsOk && std::isfinite(value) && value > 0.0 && value < 2000.0) {
@@ -543,6 +561,20 @@ void ClatashaHudWindow::readFpsState()
              trackedGamePid_,
              openGlDrawStage_,
              stageName);
+    }
+
+    const bool firstLiveFpsAck =
+        openGlLiveFpsAck_ == 0 &&
+        openGlLiveFpsAck > 0;
+    openGlLiveFpsSent_ = openGlLiveFpsSent;
+    openGlLiveFpsAck_ = openGlLiveFpsAck;
+
+    if (firstLiveFpsAck) {
+        blog(LOG_INFO,
+             "[Clatasha HUD] OpenGL live FPS transport PID %u acknowledged: tx=%d rx=%d",
+             trackedGamePid_,
+             openGlLiveFpsSent_,
+             openGlLiveFpsAck_);
     }
 
     if (found) {
@@ -814,7 +846,7 @@ void ClatashaHudWindow::refresh()
         }
 
         blog(LOG_INFO,
-             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s ogl_draw=%s draws=%llu ogl_render=%s ogl_stage=%d(%s)",
+             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s ogl_draw=%s draws=%llu ogl_render=%s ogl_stage=%d(%s) ogl_fps_tx=%d ogl_fps_rx=%d",
              trackedGamePid_,
              helperAlive ? "running" : "stopped",
              gameFpsValid_ ? QString::number(gameFps_, 'f', 1).toUtf8().constData() : "--",
@@ -827,7 +859,9 @@ void ClatashaHudWindow::refresh()
                  ? "modern"
                  : (openGlRenderMode_ == 2 ? "fallback" : "idle"),
              openGlDrawStage_,
-             openGlStageName);
+             openGlStageName,
+             openGlLiveFpsSent_,
+             openGlLiveFpsAck_);
     }
 
     if (++audioRefreshTicks_ >= 20) {
