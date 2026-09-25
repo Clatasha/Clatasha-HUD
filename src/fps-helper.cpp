@@ -330,6 +330,24 @@ std::wstring OpenGlHookDllPath()
     return result;
 }
 
+std::wstring D3D11HookDllPath()
+{
+    wchar_t path[MAX_PATH] = {};
+    const DWORD length =
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+        return {};
+
+    std::wstring result(path, length);
+    const size_t separator = result.find_last_of(L"\\/");
+    if (separator == std::wstring::npos)
+        return {};
+
+    result.erase(separator + 1);
+    result += L"clatasha-d3d11-present-hook.dll";
+    return result;
+}
+
 bool InjectLibrary(DWORD pid, const std::wstring &dllPath)
 {
     HANDLE process = OpenProcess(
@@ -451,6 +469,68 @@ void MaybeInjectOpenGlHook(
         InjectLibrary(pid, dllPath)
             ? "loaded"
             : (attempts >= 3 ? "failed" : "retrying");
+}
+
+void MaybeInjectD3D11Hook(
+    DWORD pid,
+    const std::string &renderer)
+{
+    if (pid == 0 || renderer != "D11")
+        return;
+
+    if (!IsNative64BitProcess(pid)) {
+        gOpenGlInjectStatus[pid] = "x64-required";
+        return;
+    }
+
+    const std::string current =
+        gOpenGlInjectStatus[pid];
+    if (current == "loaded" ||
+        current == "active") {
+        return;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG lastAttempt =
+        gOpenGlInjectLastAttempt[pid];
+    if (lastAttempt != 0 &&
+        now - lastAttempt < 1500) {
+        return;
+    }
+
+    int &attempts =
+        gOpenGlInjectAttempts[pid];
+    if (attempts >= 3) {
+        gOpenGlInjectStatus[pid] = "failed";
+        return;
+    }
+
+    ++attempts;
+    gOpenGlInjectLastAttempt[pid] = now;
+
+    const std::wstring dllPath =
+        D3D11HookDllPath();
+    const DWORD attributes =
+        dllPath.empty()
+            ? INVALID_FILE_ATTRIBUTES
+            : GetFileAttributesW(
+                  dllPath.c_str());
+
+    if (attributes ==
+            INVALID_FILE_ATTRIBUTES ||
+        (attributes &
+         FILE_ATTRIBUTE_DIRECTORY)) {
+        gOpenGlInjectStatus[pid] =
+            "dll-missing";
+        return;
+    }
+
+    gOpenGlInjectStatus[pid] =
+        InjectLibrary(pid, dllPath)
+            ? "loaded"
+            : (attempts >= 3
+                   ? "failed"
+                   : "retrying");
 }
 
 struct OpenGlSample {
@@ -721,11 +801,19 @@ void WriteStateFile(const std::wstring &path)
     MaybeInjectOpenGlHook(
         foregroundPid,
         foregroundRenderer);
+    MaybeInjectD3D11Hook(
+        foregroundPid,
+        foregroundRenderer);
+
+    const bool rendererUsesInjectedHud =
+        foregroundRenderer == "OGL" ||
+        foregroundRenderer == "D11";
+
     const OpenGlSample openGlSample =
         ReadOpenGlSample(
             foregroundPid,
             now,
-            foregroundRenderer == "OGL" &&
+            rendererUsesInjectedHud &&
                 foregroundFullscreen);
 
     bool foregroundWritten = false;
