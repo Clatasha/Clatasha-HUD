@@ -409,10 +409,9 @@ void MaybeInjectOpenGlHook(
     if (pid == 0 || renderer != "OGL")
         return;
 
-    const std::wstring processName = ProcessBaseName(pid);
-    if (_wcsicmp(processName.c_str(), L"Allumeria.exe") != 0)
-        return;
-
+    // Renderer detection already limits this path to foreground
+    // processes with opengl32.dll loaded. Do not hard-code a single game:
+    // support any native x64 OpenGL title that passes the same detection.
     if (!IsNative64BitProcess(pid)) {
         gOpenGlInjectStatus[pid] = "x64-required";
         return;
