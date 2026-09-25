@@ -101,6 +101,8 @@ private:
     int openGlLiveObsFpsAck_ = 0;
     int openGlLiveTimerSent_ = 0;
     int openGlLiveTimerAck_ = 0;
+    int openGlLiveAudioSent_ = 0;
+    int openGlLiveAudioAck_ = 0;
     bool gameFullscreen_ = false;
     int rendererMissSamples_ = 0;
     int gameTargetRefreshTicks_ = 0;
