@@ -330,6 +330,7 @@ void ClatashaHudWindow::updateForegroundGame()
     openGlDrawArmed_ = false;
     openGlDrawCount_ = 0;
     openGlRenderMode_ = 0;
+    openGlDrawStage_ = 0;
     gameFullscreen_ = false;
     rendererMissSamples_ = 0;
     update();
@@ -403,6 +404,7 @@ void ClatashaHudWindow::readFpsState()
     bool openGlDrawArmed = false;
     quint64 openGlDrawCount = 0;
     int openGlRenderMode = 0;
+    int openGlDrawStage = 0;
     bool fullscreen = false;
 
     while (!file.atEnd()) {
@@ -445,6 +447,13 @@ void ClatashaHudWindow::readFpsState()
                 fields.at(8).toInt(&renderModeOk);
             if (renderModeOk)
                 openGlRenderMode = parsedRenderMode;
+        }
+        if (fields.size() >= 10) {
+            bool drawStageOk = false;
+            const int parsedDrawStage =
+                fields.at(9).toInt(&drawStageOk);
+            if (drawStageOk)
+                openGlDrawStage = parsedDrawStage;
         }
 
         if (fpsOk && std::isfinite(value) && value > 0.0 && value < 2000.0) {
@@ -510,6 +519,30 @@ void ClatashaHudWindow::readFpsState()
                  trackedGamePid_,
                  openGlRenderMode_ == 1 ? "modern" : "fallback");
         }
+    }
+
+    if (openGlDrawStage != openGlDrawStage_) {
+        openGlDrawStage_ = openGlDrawStage;
+        const char *stageName = "unknown";
+        switch (openGlDrawStage_) {
+        case 0: stageName = "idle"; break;
+        case 10: stageName = "eligible"; break;
+        case 11: stageName = "renderer-entry"; break;
+        case 15: stageName = "fallback-entry"; break;
+        case 20: stageName = "renderer-ready"; break;
+        case 30: stageName = "viewport-ready"; break;
+        case 40: stageName = "state-captured"; break;
+        case 50: stageName = "overlay-state"; break;
+        case 60: stageName = "vertices-uploaded"; break;
+        case 70: stageName = "draw-returned"; break;
+        case 80: stageName = "state-restored"; break;
+        case 90: stageName = "complete"; break;
+        }
+        blog(LOG_INFO,
+             "[Clatasha HUD] OpenGL draw stage PID %u: %d (%s)",
+             trackedGamePid_,
+             openGlDrawStage_,
+             stageName);
     }
 
     if (found) {
@@ -764,8 +797,24 @@ void ClatashaHudWindow::refresh()
             }
         }
 #endif
+        const char *openGlStageName = "unknown";
+        switch (openGlDrawStage_) {
+        case 0: openGlStageName = "idle"; break;
+        case 10: openGlStageName = "eligible"; break;
+        case 11: openGlStageName = "renderer-entry"; break;
+        case 15: openGlStageName = "fallback-entry"; break;
+        case 20: openGlStageName = "renderer-ready"; break;
+        case 30: openGlStageName = "viewport-ready"; break;
+        case 40: openGlStageName = "state-captured"; break;
+        case 50: openGlStageName = "overlay-state"; break;
+        case 60: openGlStageName = "vertices-uploaded"; break;
+        case 70: openGlStageName = "draw-returned"; break;
+        case 80: openGlStageName = "state-restored"; break;
+        case 90: openGlStageName = "complete"; break;
+        }
+
         blog(LOG_INFO,
-             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s ogl_draw=%s draws=%llu ogl_render=%s",
+             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s ogl_draw=%s draws=%llu ogl_render=%s ogl_stage=%d(%s)",
              trackedGamePid_,
              helperAlive ? "running" : "stopped",
              gameFpsValid_ ? QString::number(gameFps_, 'f', 1).toUtf8().constData() : "--",
@@ -776,7 +825,9 @@ void ClatashaHudWindow::refresh()
              static_cast<unsigned long long>(openGlDrawCount_),
              openGlRenderMode_ == 1
                  ? "modern"
-                 : (openGlRenderMode_ == 2 ? "fallback" : "idle"));
+                 : (openGlRenderMode_ == 2 ? "fallback" : "idle"),
+             openGlDrawStage_,
+             openGlStageName);
     }
 
     if (++audioRefreshTicks_ >= 20) {
