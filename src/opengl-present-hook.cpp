@@ -164,12 +164,13 @@ constexpr int kObsFpsPatchX = 74;
 constexpr int kObsFpsPatchY = 3;
 constexpr int kObsFpsPatchWidth = 29;
 constexpr int kObsFpsPatchHeight = 23;
-constexpr int kTimerPatchX = 23;
-constexpr int kTimerPatchY = 28;
-constexpr int kTimerPatchWidth = 69;
-constexpr int kTimerPatchHeight = 16;
-constexpr int kTimerGlyphWidth = 8;
-constexpr int kTimerGlyphHeight = 16;
+constexpr int kTimerPatchX = 21;
+constexpr int kTimerPatchY = 27;
+constexpr int kTimerPatchWidth = 73;
+constexpr int kTimerPatchHeight = 18;
+constexpr int kTimerGlyphWidth = 10;
+constexpr int kTimerGlyphHeight = 18;
+constexpr int kTimerGlyphAdvance = 9;
 constexpr int kTimerGlyphCount = 11;
 constexpr int kMaxCachedFps = 999;
 constexpr LONG kMaxTimerSeconds = 359999; // 99:59:59
@@ -1166,7 +1167,11 @@ void UpdateLiveSessionTimerTexture()
 
     const size_t textLength = std::wcslen(timerText);
     const int textWidth =
-        static_cast<int>(textLength) * kTimerGlyphWidth;
+        textLength > 0
+            ? (static_cast<int>(textLength) - 1) *
+                  kTimerGlyphAdvance +
+                  kTimerGlyphWidth
+            : 0;
     const int startX =
         std::max(0, (kTimerPatchWidth - textWidth) / 2);
 
@@ -1189,7 +1194,8 @@ void UpdateLiveSessionTimerTexture()
             g_timerGlyphs[static_cast<size_t>(glyphIndex)];
         const int dstX =
             startX +
-            static_cast<int>(charIndex) * kTimerGlyphWidth;
+            static_cast<int>(charIndex) *
+                kTimerGlyphAdvance;
 
         for (int y = 0; y < kTimerGlyphHeight; ++y) {
             for (int x = 0; x < kTimerGlyphWidth; ++x) {
