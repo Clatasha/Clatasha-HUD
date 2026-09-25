@@ -237,7 +237,7 @@ struct alignas(8) OpenGlPresentShared {
     std::uint32_t magic;
     std::uint32_t version;
     std::uint32_t pid;
-    std::uint32_t reserved;
+    volatile LONG liveFpsAck;
     volatile LONG64 presentCount;
     volatile LONG64 lastPresentTick;
     volatile LONG hookState;
@@ -247,7 +247,7 @@ struct alignas(8) OpenGlPresentShared {
     volatile LONG64 drawCount;
     volatile LONG64 lastDrawTick;
     volatile LONG renderMode;
-    volatile LONG renderReserved;
+    volatile LONG liveFpsInput;
 };
 
 struct OpenGlRateState {
@@ -457,6 +457,8 @@ struct OpenGlSample {
     std::uint64_t drawCount = 0;
     LONG renderMode = 0;
     LONG drawStage = 0;
+    LONG liveFpsSent = 0;
+    LONG liveFpsAck = 0;
 };
 
 OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armOverlay)
@@ -506,6 +508,11 @@ OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armOverlay)
             static_cast<std::uint64_t>(shared->drawCount);
         result.renderMode = shared->renderMode;
         result.drawStage = shared->reservedControl;
+        result.liveFpsAck =
+            InterlockedCompareExchange(
+                &shared->liveFpsAck,
+                0,
+                0);
 
         if (state == 1) {
             result.status = "active";
@@ -547,6 +554,14 @@ OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armOverlay)
             result.fps = rate.fps;
             result.validFps = true;
         }
+
+        result.liveFpsSent =
+            result.validFps
+                ? static_cast<LONG>(result.fps + 0.5)
+                : 0;
+        InterlockedExchange(
+            &shared->liveFpsInput,
+            result.liveFpsSent);
     }
 
     UnmapViewOfFile(shared);
@@ -673,7 +688,7 @@ void WriteStateFile(const std::wstring &path)
     if (_wfopen_s(&fp, tmpPath.c_str(), L"wb") != 0 || !fp)
         return;
 
-    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_hook,ogl_mask,ogl_draw,ogl_draws,ogl_render,ogl_stage\n");
+    std::fprintf(fp, "# pid,fps,renderer,fullscreen,ogl_hook,ogl_mask,ogl_draw,ogl_draws,ogl_render,ogl_stage,ogl_fps_tx,ogl_fps_rx\n");
 
     for (const auto &[pid, streams] : gRates) {
         double bestFps = 0.0;
@@ -709,7 +724,7 @@ void WriteStateFile(const std::wstring &path)
             if (pid == foregroundPid && !foregroundRenderer.empty()) {
                 std::fprintf(
                     fp,
-                    "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld\n",
+                    "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld,%ld,%ld\n",
                     pid,
                     bestFps,
                     foregroundRenderer.c_str(),
@@ -719,7 +734,9 @@ void WriteStateFile(const std::wstring &path)
                     openGlSample.drawArmed ? 1 : 0,
                     static_cast<unsigned long long>(openGlSample.drawCount),
                     openGlSample.renderMode,
-                    openGlSample.drawStage);
+                    openGlSample.drawStage,
+                    openGlSample.liveFpsSent,
+                    openGlSample.liveFpsAck);
                 foregroundWritten = true;
             } else {
                 std::fprintf(fp, "%lu,%.3f\n", pid, bestFps);
@@ -735,7 +752,7 @@ void WriteStateFile(const std::wstring &path)
         !foregroundWritten) {
         std::fprintf(
             fp,
-            "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld\n",
+            "%lu,%.3f,%s,%d,%s,%ld,%d,%llu,%ld,%ld,%ld,%ld\n",
             foregroundPid,
             openGlSample.validFps ? openGlSample.fps : 0.0,
             foregroundRenderer.c_str(),
@@ -745,7 +762,9 @@ void WriteStateFile(const std::wstring &path)
             openGlSample.drawArmed ? 1 : 0,
             static_cast<unsigned long long>(openGlSample.drawCount),
             openGlSample.renderMode,
-            openGlSample.drawStage);
+            openGlSample.drawStage,
+            openGlSample.liveFpsSent,
+            openGlSample.liveFpsAck);
     }
 
     std::fclose(fp);
