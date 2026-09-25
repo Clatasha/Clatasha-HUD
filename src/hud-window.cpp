@@ -66,7 +66,7 @@ struct alignas(8) OpenGlPresentSharedTransport {
 };
 
 constexpr std::uint32_t kHudFrameMagic = 0x52464843; // CHFR
-constexpr std::uint32_t kHudFrameVersion = 1;
+constexpr std::uint32_t kHudFrameVersion = 2;
 constexpr int kHudFrameStride = kHudWidth * 4;
 constexpr int kHudFrameBytes = kHudFrameStride * kHudHeight;
 
@@ -253,10 +253,13 @@ void PublishHudFrame(quint32 pid, QWidget *widget)
         shared->width == kHudWidth &&
         shared->height == kHudHeight &&
         shared->stride == kHudFrameStride) {
+        // Match Qt/Windows translucent-window composition explicitly:
+        // publish premultiplied RGBA so injected renderers can use
+        // ONE, INV_SRC_ALPHA without reinterpreting semi-transparent pixels.
         QImage frame(
             kHudWidth,
             kHudHeight,
-            QImage::Format_RGBA8888);
+            QImage::Format_RGBA8888_Premultiplied);
         frame.fill(Qt::transparent);
 
         QPainter painter(&frame);
