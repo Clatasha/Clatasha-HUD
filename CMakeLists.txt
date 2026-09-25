@@ -69,4 +69,22 @@ if(WIN32)
     TARGETS clatasha-opengl-present-hook
     RUNTIME DESTINATION "${CMAKE_PROJECT_NAME}/data"
   )
+
+  add_library(clatasha-d3d11-present-hook SHARED src/d3d11-present-hook.cpp)
+  target_compile_definitions(
+    clatasha-d3d11-present-hook
+    PRIVATE UNICODE _UNICODE NOMINMAX
+  )
+  target_link_libraries(
+    clatasha-d3d11-present-hook
+    PRIVATE Detours::Detours d3d11 dxgi d3dcompiler
+  )
+  set_target_properties(
+    clatasha-d3d11-present-hook
+    PROPERTIES OUTPUT_NAME "clatasha-d3d11-present-hook"
+  )
+  install(
+    TARGETS clatasha-d3d11-present-hook
+    RUNTIME DESTINATION "${CMAKE_PROJECT_NAME}/data"
+  )
 endif()
