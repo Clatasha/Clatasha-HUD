@@ -45,7 +45,7 @@ struct alignas(8) OpenGlPresentShared {
     std::uint32_t magic;
     std::uint32_t version;
     std::uint32_t pid;
-    std::uint32_t reserved;
+    volatile LONG liveFpsAck; // injected DLL echoes liveFpsInput here
     volatile LONG64 presentCount;
     volatile LONG64 lastPresentTick;
     volatile LONG hookState; // 0 = starting, 1 = active, 2 = failed
@@ -55,7 +55,7 @@ struct alignas(8) OpenGlPresentShared {
     volatile LONG64 drawCount;
     volatile LONG64 lastDrawTick;
     volatile LONG renderMode; // 0 = idle, 1 = modern shader, 2 = fallback marker
-    volatile LONG renderReserved;
+    volatile LONG liveFpsInput; // helper writes integer FPS; renderer does not use it
 };
 
 using SwapBuffersFn = BOOL (WINAPI *)(HDC);
@@ -83,6 +83,17 @@ void RecordPresent()
 {
     if (!g_shared)
         return;
+
+    // Transport-only live data proof. Read the helper-provided integer FPS
+    // and echo it back. This value is deliberately not used by rendering.
+    const LONG liveFps =
+        InterlockedCompareExchange(
+            &g_shared->liveFpsInput,
+            0,
+            0);
+    InterlockedExchange(
+        &g_shared->liveFpsAck,
+        liveFps);
 
     InterlockedIncrement64(&g_shared->presentCount);
     InterlockedExchange64(
