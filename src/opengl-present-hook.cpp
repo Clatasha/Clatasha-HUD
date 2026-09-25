@@ -3,6 +3,7 @@
 #endif
 
 #include <windows.h>
+#include <gdiplus.h>
 #include <detours.h>
 #include <GL/gl.h>
 
@@ -269,6 +270,77 @@ void DrawMeter(HDC dc, int x, int y)
     DeleteObject(inactive);
 }
 
+std::wstring ModuleSiblingPath(const wchar_t *fileName)
+{
+    if (!g_moduleInstance || !fileName)
+        return {};
+
+    wchar_t path[MAX_PATH] = {};
+    const DWORD length =
+        GetModuleFileNameW(
+            g_moduleInstance,
+            path,
+            MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+        return {};
+
+    std::wstring result(path, length);
+    const size_t separator =
+        result.find_last_of(L"\\/");
+    if (separator == std::wstring::npos)
+        return {};
+
+    result.erase(separator + 1);
+    result += fileName;
+    return result;
+}
+
+bool DrawPackagedLogo(HDC dc)
+{
+    const std::wstring logoPath =
+        ModuleSiblingPath(
+            L"clatasha-hud-logo.png");
+    if (logoPath.empty())
+        return false;
+
+    Gdiplus::GdiplusStartupInput startupInput;
+    ULONG_PTR token = 0;
+    if (Gdiplus::GdiplusStartup(
+            &token,
+            &startupInput,
+            nullptr) != Gdiplus::Ok) {
+        return false;
+    }
+
+    bool drawn = false;
+    {
+        Gdiplus::Image image(
+            logoPath.c_str(),
+            FALSE);
+        if (image.GetLastStatus() ==
+            Gdiplus::Ok) {
+            Gdiplus::Graphics graphics(dc);
+            graphics.SetCompositingMode(
+                Gdiplus::CompositingModeSourceOver);
+            graphics.SetInterpolationMode(
+                Gdiplus::InterpolationModeHighQualityBicubic);
+            graphics.SetPixelOffsetMode(
+                Gdiplus::PixelOffsetModeHighQuality);
+
+            drawn =
+                graphics.DrawImage(
+                    &image,
+                    Gdiplus::Rect(
+                        127, 1,
+                        16, 16)) ==
+                Gdiplus::Ok;
+        }
+    }
+
+    Gdiplus::GdiplusShutdown(token);
+    return drawn;
+}
+
 bool BuildStaticHudPixels()
 {
     if (!g_hudPixels.empty())
@@ -388,18 +460,28 @@ bool BuildStaticHudPixels()
     MoveToEx(dc, 17, 44, nullptr);
     LineTo(dc, 17, 47);
 
-    HBRUSH logoBrush =
-        CreateSolidBrush(RGB(240, 243, 245));
-    SelectObject(dc, logoBrush);
-    SelectObject(dc, GetStockObject(NULL_PEN));
-    Ellipse(dc, 128, 2, 143, 17);
+    HBRUSH logoBrush = nullptr;
+    if (!DrawPackagedLogo(dc)) {
+        logoBrush =
+            CreateSolidBrush(
+                RGB(240, 243, 245));
+        SelectObject(dc, logoBrush);
+        SelectObject(
+            dc,
+            GetStockObject(NULL_PEN));
+        Ellipse(dc, 128, 2, 143, 17);
 
-    SelectObject(dc, smallBold);
-    SetTextColor(dc, RGB(18, 22, 26));
-    RECT logoRect{128, 1, 143, 18};
-    DrawTextW(
-        dc, L"C", -1, &logoRect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, smallBold);
+        SetTextColor(
+            dc,
+            RGB(18, 22, 26));
+        RECT logoRect{128, 1, 143, 18};
+        DrawTextW(
+            dc, L"C", -1, &logoRect,
+            DT_CENTER |
+                DT_VCENTER |
+                DT_SINGLELINE);
+    }
 
     const auto *source =
         static_cast<const std::uint8_t *>(bits);
@@ -876,7 +958,8 @@ bool BuildStaticHudPixels()
 
     DeleteObject(iconPen);
     DeleteObject(dotBrush);
-    DeleteObject(logoBrush);
+    if (logoBrush)
+        DeleteObject(logoBrush);
     DeleteObject(badgePen);
     DeleteObject(badgeBrush);
     DeleteObject(tinyFont);
@@ -945,6 +1028,7 @@ using GlDeleteProgramFn = void (APIENTRYP)(GLuint);
 using GlUseProgramFn = void (APIENTRYP)(GLuint);
 using GlGetUniformLocationFn = GLint (APIENTRYP)(GLuint, const char *);
 using GlUniform1iFn = void (APIENTRYP)(GLint, GLint);
+using GlUniform1fFn = void (APIENTRYP)(GLint, GLfloat);
 using GlGenBuffersFn = void (APIENTRYP)(GLsizei, GLuint *);
 using GlBindBufferFn = void (APIENTRYP)(GLenum, GLuint);
 using GlBufferDataFn = void (APIENTRYP)(
@@ -971,6 +1055,7 @@ GlDeleteProgramFn g_glDeleteProgram = nullptr;
 GlUseProgramFn g_glUseProgram = nullptr;
 GlGetUniformLocationFn g_glGetUniformLocation = nullptr;
 GlUniform1iFn g_glUniform1i = nullptr;
+GlUniform1fFn g_glUniform1f = nullptr;
 GlGenBuffersFn g_glGenBuffers = nullptr;
 GlBindBufferFn g_glBindBuffer = nullptr;
 GlBufferDataFn g_glBufferData = nullptr;
@@ -984,6 +1069,8 @@ GLuint g_hudProgram = 0;
 GLuint g_hudVao = 0;
 GLuint g_hudVbo = 0;
 GLint g_hudSampler = -1;
+GLint g_hudOpacity = -1;
+HINSTANCE g_moduleInstance = nullptr;
 HGLRC g_modernContext = nullptr;
 bool g_modernLoadFailed = false;
 
@@ -1032,6 +1119,7 @@ bool LoadModernGl()
         LoadProc(g_glUseProgram, "glUseProgram") &&
         LoadProc(g_glGetUniformLocation, "glGetUniformLocation") &&
         LoadProc(g_glUniform1i, "glUniform1i") &&
+        LoadProc(g_glUniform1f, "glUniform1f") &&
         LoadProc(g_glGenBuffers, "glGenBuffers") &&
         LoadProc(g_glBindBuffer, "glBindBuffer") &&
         LoadProc(g_glBufferData, "glBufferData") &&
@@ -1076,10 +1164,12 @@ bool CreateHudProgram()
     static const char *fragmentSource =
         "#version 150 core\n"
         "uniform sampler2D uTex;\n"
+        "uniform float uOpacity;\n"
         "in vec2 vUv;\n"
         "out vec4 fragColor;\n"
         "void main() {\n"
-        "  fragColor = texture(uTex, vUv);\n"
+        "  vec4 sampled = texture(uTex, vUv);\n"
+        "  fragColor = vec4(sampled.rgb, sampled.a * uOpacity);\n"
         "}\n";
 
     const GLuint vertex =
@@ -1121,7 +1211,10 @@ bool CreateHudProgram()
 
     g_hudSampler =
         g_glGetUniformLocation(g_hudProgram, "uTex");
-    return g_hudSampler >= 0;
+    g_hudOpacity =
+        g_glGetUniformLocation(g_hudProgram, "uOpacity");
+    return g_hudSampler >= 0 &&
+           g_hudOpacity >= 0;
 }
 
 bool CreateHudTexture()
@@ -2058,6 +2151,7 @@ bool EnsureModernHudRenderer()
 
     g_glUseProgram(g_hudProgram);
     g_glUniform1i(g_hudSampler, 0);
+    g_glUniform1f(g_hudOpacity, 1.0f);
 
     g_glUseProgram(static_cast<GLuint>(oldProgram));
     g_glBindBuffer(
@@ -2236,8 +2330,31 @@ void DrawStaticHud(HDC dc)
         GL_STREAM_DRAW);
     SetDrawStage(DrawStageVerticesUploaded);
 
+    const std::uint32_t packedStatus =
+        g_shared
+            ? static_cast<std::uint32_t>(
+                  InterlockedCompareExchange(
+                      &g_shared->liveHudStatus,
+                      0,
+                      0))
+            : 0u;
+    int opacityPercent =
+        static_cast<int>(
+            (packedStatus >>
+             kHudStatusOpacityShift) &
+            0x7Fu);
+    if (opacityPercent <= 0 ||
+        opacityPercent > 100) {
+        opacityPercent = 100;
+    }
+
     glBindTexture(GL_TEXTURE_2D, g_hudTexture);
     g_glUniform1i(g_hudSampler, 0);
+    g_glUniform1f(
+        g_hudOpacity,
+        static_cast<GLfloat>(
+            opacityPercent) /
+            100.0f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     SetDrawStage(DrawStageDrawReturned);
 
@@ -2460,6 +2577,7 @@ DWORD WINAPI HookWorker(void *)
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
+        g_moduleInstance = instance;
         DisableThreadLibraryCalls(instance);
         DetourRestoreAfterWith();
 
