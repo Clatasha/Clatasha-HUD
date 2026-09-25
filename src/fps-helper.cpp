@@ -34,6 +34,7 @@ constexpr USHORT kDxgKrnlPresentHistoryStartEventId = 0x00ab;
 constexpr USHORT kDxgKrnlPresentHistoryDetailedStartEventId = 0x00d7;
 constexpr DWORD kSampleMs = 250;
 constexpr double kWindowMs = 1000.0;
+constexpr ULONGLONG kFullscreenExitGraceMs = 2000;
 
 const GUID kDxgiProvider =
     {0xCA11C036, 0x0102, 0x4A2D, {0xA6, 0xAD, 0xF0, 0x3C, 0xFE, 0xD5, 0xD3, 0xC9}};
@@ -221,13 +222,62 @@ bool IsFullscreenForegroundWindow(HWND hwnd)
     if (!GetMonitorInfoW(monitor, &monitorInfo))
         return false;
 
-    constexpr LONG tolerance = 3;
+    constexpr LONG tolerance = 8;
     const RECT &screen = monitorInfo.rcMonitor;
 
-    return topLeft.x <= screen.left + tolerance &&
-           topLeft.y <= screen.top + tolerance &&
-           bottomRight.x >= screen.right - tolerance &&
-           bottomRight.y >= screen.bottom - tolerance;
+    const bool clientCoversMonitor =
+        topLeft.x <= screen.left + tolerance &&
+        topLeft.y <= screen.top + tolerance &&
+        bottomRight.x >= screen.right - tolerance &&
+        bottomRight.y >= screen.bottom - tolerance;
+    if (clientCoversMonitor)
+        return true;
+
+    // Borderless games can report a client rectangle that momentarily shrinks
+    // during focus/style transitions even though the top-level window still
+    // covers the monitor. Use the outer window rectangle as a fallback.
+    RECT windowRect{};
+    if (!GetWindowRect(hwnd, &windowRect))
+        return false;
+
+    return windowRect.left <= screen.left + tolerance &&
+           windowRect.top <= screen.top + tolerance &&
+           windowRect.right >= screen.right - tolerance &&
+           windowRect.bottom >= screen.bottom - tolerance;
+}
+
+struct FullscreenGateState {
+    bool latched = false;
+    ULONGLONG lastPositiveMs = 0;
+};
+
+std::map<DWORD, FullscreenGateState> gFullscreenGateStates;
+
+bool EffectiveFullscreenState(
+    DWORD pid,
+    bool rawFullscreen,
+    ULONGLONG now)
+{
+    if (pid == 0)
+        return false;
+
+    auto &state = gFullscreenGateStates[pid];
+
+    if (rawFullscreen) {
+        state.latched = true;
+        state.lastPositiveMs = now;
+        return true;
+    }
+
+    if (state.latched &&
+        state.lastPositiveMs != 0 &&
+        now >= state.lastPositiveMs &&
+        now - state.lastPositiveMs <= kFullscreenExitGraceMs) {
+        return true;
+    }
+
+    state.latched = false;
+    return false;
 }
 
 constexpr std::uint32_t kOpenGlSharedMagic = 0x4C474F43;
@@ -404,8 +454,16 @@ void MaybeInjectOpenGlHook(
         return;
 
     const std::wstring processName = ProcessBaseName(pid);
-    if (_wcsicmp(processName.c_str(), L"Allumeria.exe") != 0)
+    if (processName.empty())
         return;
+
+    // The first renderer proof was intentionally restricted to Allumeria.
+    // OpenGL injection is now available to any 64-bit foreground OpenGL app,
+    // while keeping OBS and the helper itself out of the injection path.
+    if (_wcsicmp(processName.c_str(), L"obs64.exe") == 0 ||
+        _wcsicmp(processName.c_str(), L"clatasha-fps-helper.exe") == 0) {
+        return;
+    }
 
     if (!IsNative64BitProcess(pid)) {
         gOpenGlInjectStatus[pid] = "x64-required";
@@ -627,8 +685,13 @@ void WriteStateFile(const std::wstring &path)
     if (foreground)
         GetWindowThreadProcessId(foreground, &foregroundPid);
 
-    const bool foregroundFullscreen =
+    const bool rawForegroundFullscreen =
         IsFullscreenForegroundWindow(foreground);
+    const bool foregroundFullscreen =
+        EffectiveFullscreenState(
+            foregroundPid,
+            rawForegroundFullscreen,
+            now);
     const std::string foregroundRenderer =
         RendererTagForProcess(foregroundPid);
 
