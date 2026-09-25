@@ -223,6 +223,7 @@ std::vector<std::uint8_t> g_timerBasePatch;
 std::vector<std::uint8_t> g_timerScratch;
 std::vector<std::uint8_t> g_audioBasePatch;
 std::vector<std::uint8_t> g_audioScratch;
+std::vector<std::vector<std::uint8_t>> g_audioLevelPatches;
 std::vector<std::uint8_t> g_liveFpsScratch;
 std::vector<std::vector<std::uint8_t>> g_diskGlyphs;
 std::vector<std::uint8_t> g_diskBasePatch;
@@ -558,6 +559,256 @@ bool DrawAudioSourceIcons(HDC dc)
     return drawn;
 }
 
+bool DrawPolishedHudChrome(HDC dc)
+{
+    if (!dc)
+        return false;
+
+    Gdiplus::GdiplusStartupInput startupInput;
+    ULONG_PTR token = 0;
+    if (Gdiplus::GdiplusStartup(
+            &token,
+            &startupInput,
+            nullptr) != Gdiplus::Ok) {
+        return false;
+    }
+
+    bool drawn = false;
+    {
+        Gdiplus::Graphics graphics(dc);
+        graphics.SetSmoothingMode(
+            Gdiplus::SmoothingModeAntiAlias);
+        graphics.SetPixelOffsetMode(
+            Gdiplus::PixelOffsetModeHighQuality);
+        graphics.SetCompositingQuality(
+            Gdiplus::CompositingQualityHighQuality);
+        graphics.SetTextRenderingHint(
+            Gdiplus::TextRenderingHintAntiAliasGridFit);
+
+        Gdiplus::GraphicsPath panel;
+        AddRoundedRectPath(
+            panel,
+            Gdiplus::RectF(
+                0.5f,
+                0.5f,
+                static_cast<Gdiplus::REAL>(kHudWidth) - 1.0f,
+                static_cast<Gdiplus::REAL>(kHudHeight) - 1.0f),
+            4.0f);
+
+        Gdiplus::SolidBrush panelBrush(
+            Gdiplus::Color(
+                238,
+                8,
+                10,
+                12));
+        Gdiplus::Pen borderPen(
+            Gdiplus::Color(
+                105,
+                100,
+                109,
+                116),
+            1.0f);
+        graphics.FillPath(
+            &panelBrush,
+            &panel);
+        graphics.DrawPath(
+            &borderPen,
+            &panel);
+
+        // Exact renderer badge geometry/colors from the Qt HUD.
+        Gdiplus::GraphicsPath badge;
+        AddRoundedRectPath(
+            badge,
+            Gdiplus::RectF(
+                102.0f,
+                2.0f,
+                23.0f,
+                10.0f),
+            2.0f);
+        Gdiplus::SolidBrush badgeBrush(
+            Gdiplus::Color(
+                205,
+                22,
+                27,
+                32));
+        Gdiplus::Pen badgePen(
+            Gdiplus::Color(
+                170,
+                96,
+                106,
+                116),
+            0.8f);
+        graphics.FillPath(
+            &badgeBrush,
+            &badge);
+        graphics.DrawPath(
+            &badgePen,
+            &badge);
+
+        Gdiplus::FontFamily family(
+            L"Segoe UI");
+        Gdiplus::Font rendererFont(
+            &family,
+            8.0f,
+            Gdiplus::FontStyleBold,
+            Gdiplus::UnitPixel);
+        Gdiplus::SolidBrush rendererBrush(
+            Gdiplus::Color(
+                255,
+                210,
+                216,
+                221));
+        Gdiplus::StringFormat format;
+        format.SetAlignment(
+            Gdiplus::StringAlignmentCenter);
+        format.SetLineAlignment(
+            Gdiplus::StringAlignmentCenter);
+        graphics.DrawString(
+            L"OGL",
+            -1,
+            &rendererFont,
+            Gdiplus::RectF(
+                102.0f,
+                2.0f,
+                23.0f,
+                10.0f),
+            &format,
+            &rendererBrush);
+
+        drawn = true;
+    }
+
+    Gdiplus::GdiplusShutdown(token);
+    return drawn;
+}
+
+void BlendRoundedRect(
+    std::vector<std::uint8_t> &patch,
+    int patchWidth,
+    int patchHeight,
+    double x,
+    double y,
+    double width,
+    double height,
+    double radius,
+    std::uint8_t red,
+    std::uint8_t green,
+    std::uint8_t blue,
+    std::uint8_t alpha)
+{
+    constexpr int samples = 4;
+    constexpr double invSamples =
+        1.0 / static_cast<double>(samples);
+    constexpr double invSampleCount =
+        1.0 / static_cast<double>(samples * samples);
+
+    const int minX =
+        std::max(0, static_cast<int>(std::floor(x - 1.0)));
+    const int maxX =
+        std::min(
+            patchWidth - 1,
+            static_cast<int>(std::ceil(x + width + 1.0)));
+    const int minY =
+        std::max(0, static_cast<int>(std::floor(y - 1.0)));
+    const int maxY =
+        std::min(
+            patchHeight - 1,
+            static_cast<int>(std::ceil(y + height + 1.0)));
+
+    const double left = x;
+    const double top = y;
+    const double right = x + width;
+    const double bottom = y + height;
+    const double r =
+        std::max(
+            0.0,
+            std::min(
+                radius,
+                std::min(width, height) * 0.5));
+
+    const auto inside =
+        [&](double px, double py) {
+            if (px < left || px > right ||
+                py < top || py > bottom) {
+                return false;
+            }
+            if (r <= 0.0)
+                return true;
+
+            const double cx =
+                std::clamp(
+                    px,
+                    left + r,
+                    right - r);
+            const double cy =
+                std::clamp(
+                    py,
+                    top + r,
+                    bottom - r);
+            const double dx = px - cx;
+            const double dy = py - cy;
+            return dx * dx + dy * dy <= r * r;
+        };
+
+    for (int py = minY; py <= maxY; ++py) {
+        for (int px = minX; px <= maxX; ++px) {
+            int covered = 0;
+            for (int sy = 0; sy < samples; ++sy) {
+                for (int sx = 0; sx < samples; ++sx) {
+                    const double sampleX =
+                        px + (sx + 0.5) * invSamples;
+                    const double sampleY =
+                        py + (sy + 0.5) * invSamples;
+                    if (inside(sampleX, sampleY))
+                        ++covered;
+                }
+            }
+
+            if (covered == 0)
+                continue;
+
+            const double coverage =
+                covered * invSampleCount;
+            const int effectiveAlpha =
+                static_cast<int>(
+                    std::lround(
+                        static_cast<double>(alpha) *
+                        coverage));
+            if (effectiveAlpha <= 0)
+                continue;
+
+            const size_t index =
+                (static_cast<size_t>(py) *
+                     static_cast<size_t>(patchWidth) +
+                 static_cast<size_t>(px)) *
+                4;
+            const int inverse =
+                255 - effectiveAlpha;
+
+            patch[index + 0] =
+                static_cast<std::uint8_t>(
+                    (red * effectiveAlpha +
+                     patch[index + 0] * inverse) /
+                    255);
+            patch[index + 1] =
+                static_cast<std::uint8_t>(
+                    (green * effectiveAlpha +
+                     patch[index + 1] * inverse) /
+                    255);
+            patch[index + 2] =
+                static_cast<std::uint8_t>(
+                    (blue * effectiveAlpha +
+                     patch[index + 2] * inverse) /
+                    255);
+            patch[index + 3] =
+                std::max<std::uint8_t>(
+                    patch[index + 3],
+                    static_cast<std::uint8_t>(
+                        effectiveAlpha));
+        }
+    }
+}
+
 bool BuildStaticHudPixels()
 {
     if (!g_hudPixels.empty())
@@ -596,31 +847,52 @@ bool BuildStaticHudPixels()
         static_cast<SIZE_T>(kHudWidth) *
             static_cast<SIZE_T>(kHudHeight) * 4);
 
-    HPEN borderPen =
-        CreatePen(PS_SOLID, 1, RGB(100, 109, 116));
-    HBRUSH panelBrush =
-        CreateSolidBrush(RGB(8, 10, 12));
-    HGDIOBJ oldPen = SelectObject(dc, borderPen);
-    HGDIOBJ oldBrush = SelectObject(dc, panelBrush);
-    RoundRect(dc, 0, 0, kHudWidth, kHudHeight, 8, 8);
+    HGDIOBJ oldPen =
+        SelectObject(
+            dc,
+            GetStockObject(NULL_PEN));
+    HGDIOBJ oldBrush =
+        SelectObject(
+            dc,
+            GetStockObject(NULL_BRUSH));
 
-    DrawMeter(dc, 5, 5);
-    DrawMeter(dc, 17, 5);
+    if (!DrawPolishedHudChrome(dc)) {
+        HPEN fallbackBorder =
+            CreatePen(
+                PS_SOLID,
+                1,
+                RGB(100, 109, 116));
+        HBRUSH fallbackPanel =
+            CreateSolidBrush(
+                RGB(8, 10, 12));
+        SelectObject(dc, fallbackBorder);
+        SelectObject(dc, fallbackPanel);
+        RoundRect(
+            dc,
+            0,
+            0,
+            kHudWidth,
+            kHudHeight,
+            8,
+            8);
+        DeleteObject(fallbackBorder);
+        DeleteObject(fallbackPanel);
+    }
 
     SetBkMode(dc, TRANSPARENT);
 
     HFONT fpsFont = CreateFontW(
-        -29, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        -32, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     HFONT smallBold = CreateFontW(
-        -12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        -13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     HFONT tinyFont = CreateFontW(
-        -9, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -636,21 +908,10 @@ bool BuildStaticHudPixels()
     // Leave the OBS FPS rectangle clean. Its /NN value is pre-rendered into
     // cached patches below and updated independently from game FPS.
 
-    HBRUSH badgeBrush =
-        CreateSolidBrush(RGB(22, 27, 32));
-    HPEN badgePen =
-        CreatePen(PS_SOLID, 1, RGB(96, 106, 116));
-    SelectObject(dc, badgeBrush);
-    SelectObject(dc, badgePen);
-    RoundRect(dc, 102, 2, 126, 13, 4, 4);
+    HBRUSH badgeBrush = nullptr;
+    HPEN badgePen = nullptr;
 
     SelectObject(dc, tinyFont);
-    SetTextColor(dc, RGB(210, 216, 221));
-    RECT oglRect{102, 2, 126, 13};
-    DrawTextW(
-        dc, L"OGL", -1, &oglRect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
     SetTextColor(dc, RGB(205, 209, 212));
     // Leave the timer rectangle clean. Timer glyphs are cached once below.
 
@@ -729,7 +990,12 @@ bool BuildStaticHudPixels()
             g_hudPixels[index + 1] = g;
             g_hudPixels[index + 2] = b;
 
-            if (r == 0 && g == 0 && b == 0) {
+            const std::uint8_t sourceAlpha =
+                source[index + 3];
+            if (sourceAlpha != 0) {
+                g_hudPixels[index + 3] =
+                    sourceAlpha;
+            } else if (r == 0 && g == 0 && b == 0) {
                 g_hudPixels[index + 3] = 0;
             } else if (r <= 14 && g <= 16 && b <= 18) {
                 g_hudPixels[index + 3] = 238;
@@ -752,14 +1018,14 @@ bool BuildStaticHudPixels()
             DeleteObject(iconPen);
         DeleteObject(dotBrush);
         DeleteObject(logoBrush);
-        DeleteObject(badgePen);
-        DeleteObject(badgeBrush);
+        if (badgePen)
+            DeleteObject(badgePen);
+        if (badgeBrush)
+            DeleteObject(badgeBrush);
         DeleteObject(tinyFont);
         DeleteObject(smallBold);
         DeleteObject(fpsFont);
-        DeleteObject(panelBrush);
-        DeleteObject(borderPen);
-        DeleteObject(bitmap);
+                          DeleteObject(bitmap);
         DeleteDC(dc);
         return false;
     }
@@ -792,14 +1058,14 @@ bool BuildStaticHudPixels()
             DeleteObject(iconPen);
         DeleteObject(dotBrush);
         DeleteObject(logoBrush);
-        DeleteObject(badgePen);
-        DeleteObject(badgeBrush);
+        if (badgePen)
+            DeleteObject(badgePen);
+        if (badgeBrush)
+            DeleteObject(badgeBrush);
         DeleteObject(tinyFont);
         DeleteObject(smallBold);
         DeleteObject(fpsFont);
-        DeleteObject(panelBrush);
-        DeleteObject(borderPen);
-        DeleteObject(bitmap);
+                          DeleteObject(bitmap);
         DeleteDC(dc);
         return false;
     }
@@ -850,7 +1116,7 @@ bool BuildStaticHudPixels()
 
         wchar_t fpsText[16] = {};
         swprintf_s(fpsText, L"%d", fpsValue);
-        RECT localFpsRect{0, -5, kFpsPatchWidth, kFpsPatchHeight - 3};
+        RECT localFpsRect{0, -3, 52, 33};
         DrawTextW(
             fpsDc,
             fpsText,
@@ -931,9 +1197,9 @@ bool BuildStaticHudPixels()
         wchar_t obsFpsText[16] = {};
         swprintf_s(obsFpsText, L"/%d", obsFpsValue);
         RECT localObsFpsRect{
-            0, 0,
+            0, 1,
             kObsFpsPatchWidth,
-            kObsFpsPatchHeight};
+            24};
         DrawTextW(
             fpsDc,
             obsFpsText,
@@ -1074,6 +1340,92 @@ bool BuildStaticHudPixels()
     }
     g_audioScratch = g_audioBasePatch;
 
+    g_audioLevelPatches.clear();
+    g_audioLevelPatches.resize(
+        (kAudioSegments + 1) *
+        (kAudioSegments + 1));
+
+    for (int desktopActive = 0;
+         desktopActive <= kAudioSegments;
+         ++desktopActive) {
+        for (int micActive = 0;
+             micActive <= kAudioSegments;
+             ++micActive) {
+            auto &patch =
+                g_audioLevelPatches[
+                    static_cast<size_t>(
+                        desktopActive *
+                            (kAudioSegments + 1) +
+                        micActive)];
+            patch = g_audioBasePatch;
+
+            const auto drawMeter =
+                [&](double meterX,
+                    int activeSegments) {
+                    for (int i = 0;
+                         i < kAudioSegments;
+                         ++i) {
+                        const double segmentY =
+                            25.0 -
+                            i *
+                                (kAudioSegmentHeight +
+                                 kAudioSegmentGap);
+                        const bool active =
+                            i < activeSegments;
+                        BlendRoundedRect(
+                            patch,
+                            kAudioPatchWidth,
+                            kAudioPatchHeight,
+                            meterX,
+                            segmentY,
+                            3.0,
+                            4.0,
+                            0.8,
+                            active ? 31 : 49,
+                            active ? 218 : 55,
+                            active ? 102 : 59,
+                            active ? 255 : 205);
+                    }
+                };
+
+            drawMeter(1.0, desktopActive);
+            drawMeter(13.0, micActive);
+        }
+    }
+
+    if (!g_audioLevelPatches.empty()) {
+        const auto &inactive =
+            g_audioLevelPatches.front();
+        for (int y = 0;
+             y < kAudioPatchHeight;
+             ++y) {
+            for (int x = 0;
+                 x < kAudioPatchWidth;
+                 ++x) {
+                const size_t srcIndex =
+                    (static_cast<size_t>(y) *
+                         kAudioPatchWidth +
+                     static_cast<size_t>(x)) *
+                    4;
+                const size_t dstIndex =
+                    (static_cast<size_t>(
+                         y + kAudioPatchY) *
+                         kHudWidth +
+                     static_cast<size_t>(
+                         x + kAudioPatchX)) *
+                    4;
+                g_hudPixels[dstIndex + 0] =
+                    inactive[srcIndex + 0];
+                g_hudPixels[dstIndex + 1] =
+                    inactive[srcIndex + 1];
+                g_hudPixels[dstIndex + 2] =
+                    inactive[srcIndex + 2];
+                g_hudPixels[dstIndex + 3] =
+                    inactive[srcIndex + 3];
+            }
+        }
+    }
+
     g_diskBasePatch.resize(
         static_cast<size_t>(kDiskPatchWidth) *
         static_cast<size_t>(kDiskPatchHeight) * 4);
@@ -1191,14 +1543,14 @@ bool BuildStaticHudPixels()
     DeleteObject(dotBrush);
     if (logoBrush)
         DeleteObject(logoBrush);
-    DeleteObject(badgePen);
-    DeleteObject(badgeBrush);
+    if (badgePen)
+        DeleteObject(badgePen);
+    if (badgeBrush)
+        DeleteObject(badgeBrush);
     DeleteObject(tinyFont);
     DeleteObject(smallBold);
     DeleteObject(fpsFont);
-    DeleteObject(panelBrush);
-    DeleteObject(borderPen);
-    DeleteObject(bitmap);
+              DeleteObject(bitmap);
     DeleteDC(dc);
 
     return true;
@@ -1843,49 +2195,17 @@ void UpdateLiveAudioMetersTexture()
             0,
             kAudioSegments);
 
-    g_audioScratch = g_audioBasePatch;
-
-    const auto paintMeter =
-        [&](int meterX, int activeSegments) {
-            for (int i = 0; i < kAudioSegments; ++i) {
-                const int sy =
-                    25 -
-                    i * (kAudioSegmentHeight +
-                         kAudioSegmentGap);
-                const bool active = i < activeSegments;
-                const std::uint8_t r = active ? 31 : 49;
-                const std::uint8_t g = active ? 218 : 55;
-                const std::uint8_t b = active ? 102 : 59;
-
-                for (int y = 0;
-                     y < kAudioSegmentHeight;
-                     ++y) {
-                    for (int x = 0; x < 3; ++x) {
-                        const int px = meterX + x;
-                        const int py = sy + y;
-                        if (px < 0 ||
-                            px >= kAudioPatchWidth ||
-                            py < 0 ||
-                            py >= kAudioPatchHeight) {
-                            continue;
-                        }
-
-                        const size_t index =
-                            (static_cast<size_t>(py) *
-                                 kAudioPatchWidth +
-                             static_cast<size_t>(px)) *
-                            4;
-                        g_audioScratch[index + 0] = r;
-                        g_audioScratch[index + 1] = g;
-                        g_audioScratch[index + 2] = b;
-                        g_audioScratch[index + 3] = 255;
-                    }
-                }
-            }
-        };
-
-    paintMeter(1, desktopActive);
-    paintMeter(13, micActive);
+    const size_t audioPatchIndex =
+        static_cast<size_t>(
+            desktopActive *
+                (kAudioSegments + 1) +
+            micActive);
+    if (audioPatchIndex >=
+        g_audioLevelPatches.size()) {
+        return;
+    }
+    const auto &audioPatch =
+        g_audioLevelPatches[audioPatchIndex];
 
     SetDrawStage(DrawStageLiveAudioUploadEntry);
 
@@ -1905,7 +2225,7 @@ void UpdateLiveAudioMetersTexture()
         kAudioPatchHeight,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
-        g_audioScratch.data());
+        audioPatch.data());
 
     glPixelStorei(
         GL_UNPACK_ALIGNMENT,
