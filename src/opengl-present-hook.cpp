@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <detours.h>
+#include <GL/gl.h>
 
 #include <cstdint>
 #include <cwchar>
@@ -198,7 +199,7 @@ BOOL WINAPI HookedSwapBuffers(HDC dc)
 
 BOOL WINAPI HookedWglSwapBuffers(HDC dc)
 {
-    SwapBegin();
+    SwapBegin(dc);
     const BOOL result =
         g_realWglSwapBuffers ? g_realWglSwapBuffers(dc) : FALSE;
     SwapEnd();
@@ -207,7 +208,7 @@ BOOL WINAPI HookedWglSwapBuffers(HDC dc)
 
 BOOL WINAPI HookedWglSwapLayerBuffers(HDC dc, UINT planes)
 {
-    SwapBegin();
+    SwapBegin(dc);
     const BOOL result =
         g_realWglSwapLayerBuffers
             ? g_realWglSwapLayerBuffers(dc, planes)
