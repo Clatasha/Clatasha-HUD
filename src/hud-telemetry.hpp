@@ -5,9 +5,14 @@
 namespace clatasha {
 
 constexpr std::uint32_t kHudTelemetryMagic = 0x44554843; // "CHUD"
-constexpr std::uint32_t kHudTelemetryVersion = 1;
+constexpr std::uint32_t kHudTelemetryVersion = 2;
 inline constexpr wchar_t kHudTelemetryMappingName[] =
-    L"Local\\ClatashaHUD_Telemetry_v1";
+    L"Local\\ClatashaHUD_Telemetry_v2";
+
+constexpr std::int32_t kHudPixelWidth = 145;
+constexpr std::int32_t kHudPixelHeight = 50;
+constexpr std::int32_t kHudPixelBytes =
+    kHudPixelWidth * kHudPixelHeight * 4;
 
 enum HudLocation : std::int32_t {
     HudTopLeft = 0,
@@ -31,6 +36,14 @@ struct alignas(8) HudTelemetryShared {
     volatile std::int32_t location;
     std::int64_t elapsedMs;
     wchar_t diskText[16];
+
+    // The OBS process renders the final HUD image. Injected render backends
+    // only copy these RGBA pixels to their API texture.
+    volatile std::int32_t pixelWidth;
+    volatile std::int32_t pixelHeight;
+    volatile std::int32_t pixelBytes;
+    volatile std::int32_t pixelReserved;
+    std::uint8_t rgba[kHudPixelBytes];
 };
 
 } // namespace clatasha
