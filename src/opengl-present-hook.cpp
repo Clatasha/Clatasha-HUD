@@ -19,7 +19,7 @@
 namespace {
 
 constexpr std::uint32_t kSharedMagic = 0x4C474F43; // "COGL"
-constexpr std::uint32_t kSharedVersion = 4;
+constexpr std::uint32_t kSharedVersion = 5;
 
 enum HookBits : LONG {
     HookSwapBuffers = 1 << 0,
@@ -39,6 +39,8 @@ enum DrawStage : LONG {
     DrawStageLiveObsFpsUploadDone = 24,
     DrawStageLiveTimerUploadEntry = 25,
     DrawStageLiveTimerUploadDone = 26,
+    DrawStageLiveAudioUploadEntry = 27,
+    DrawStageLiveAudioUploadDone = 28,
     DrawStageViewportReady = 30,
     DrawStageStateCaptured = 40,
     DrawStageOverlayStateApplied = 50,
@@ -65,6 +67,8 @@ struct alignas(8) OpenGlPresentShared {
     volatile LONG liveFpsInput;
     volatile LONG liveSessionSeconds; // OBS writes elapsed recording/stream seconds
     volatile LONG liveSessionSecondsAck; // last timer value uploaded by renderer
+    volatile LONG liveAudioLevels; // desktop low16, mic high16, each 0..1000
+    volatile LONG liveAudioLevelsAck;
 };
 
 using SwapBuffersFn = BOOL (WINAPI *)(HDC);
@@ -160,6 +164,7 @@ constexpr int kFpsPatchX = 22;
 constexpr int kFpsPatchY = 0;
 constexpr int kFpsPatchWidth = 53;
 constexpr int kFpsPatchHeight = 34;
+constexpr int kFpsUploadHeight = 27;
 constexpr int kObsFpsPatchX = 74;
 constexpr int kObsFpsPatchY = 3;
 constexpr int kObsFpsPatchWidth = 29;
@@ -172,6 +177,13 @@ constexpr int kTimerGlyphWidth = 10;
 constexpr int kTimerGlyphHeight = 18;
 constexpr int kTimerGlyphAdvance = 9;
 constexpr int kTimerGlyphCount = 11;
+constexpr int kAudioPatchX = 4;
+constexpr int kAudioPatchY = 5;
+constexpr int kAudioPatchWidth = 17;
+constexpr int kAudioPatchHeight = 29;
+constexpr int kAudioSegments = 6;
+constexpr int kAudioSegmentHeight = 4;
+constexpr int kAudioSegmentGap = 1;
 constexpr int kMaxCachedFps = 999;
 constexpr LONG kMaxTimerSeconds = 359999; // 99:59:59
 
@@ -183,9 +195,12 @@ std::vector<std::vector<std::uint8_t>> g_liveObsFpsPatches;
 std::vector<std::vector<std::uint8_t>> g_timerGlyphs;
 std::vector<std::uint8_t> g_timerBasePatch;
 std::vector<std::uint8_t> g_timerScratch;
+std::vector<std::uint8_t> g_audioBasePatch;
+std::vector<std::uint8_t> g_audioScratch;
 LONG g_lastRenderedLiveFps = -1;
 LONG g_lastRenderedLiveObsFps = -1;
 LONG g_lastRenderedSessionSeconds = -1;
+LONG g_lastRenderedAudioLevels = -1;
 
 bool ShouldDrawOverlay(HDC dc)
 {
@@ -497,7 +512,7 @@ bool BuildStaticHudPixels()
 
         wchar_t fpsText[16] = {};
         swprintf_s(fpsText, L"%d", fpsValue);
-        RECT localFpsRect{0, -2, kFpsPatchWidth, kFpsPatchHeight};
+        RECT localFpsRect{0, -5, kFpsPatchWidth, kFpsPatchHeight - 3};
         DrawTextW(
             fpsDc,
             fpsText,
@@ -701,6 +716,25 @@ bool BuildStaticHudPixels()
     }
 
     g_timerScratch = g_timerBasePatch;
+
+    g_audioBasePatch.resize(
+        static_cast<size_t>(kAudioPatchWidth) *
+        static_cast<size_t>(kAudioPatchHeight) * 4);
+    for (int y = 0; y < kAudioPatchHeight; ++y) {
+        for (int x = 0; x < kAudioPatchWidth; ++x) {
+            const size_t srcIndex =
+                (static_cast<size_t>(y + kAudioPatchY) * kHudWidth +
+                 static_cast<size_t>(x + kAudioPatchX)) * 4;
+            const size_t dstIndex =
+                (static_cast<size_t>(y) * kAudioPatchWidth +
+                 static_cast<size_t>(x)) * 4;
+            g_audioBasePatch[dstIndex + 0] = g_hudPixels[srcIndex + 0];
+            g_audioBasePatch[dstIndex + 1] = g_hudPixels[srcIndex + 1];
+            g_audioBasePatch[dstIndex + 2] = g_hudPixels[srcIndex + 2];
+            g_audioBasePatch[dstIndex + 3] = g_hudPixels[srcIndex + 3];
+        }
+    }
+    g_audioScratch = g_audioBasePatch;
 
     SelectObject(fpsDc, fpsOldFont);
     SelectObject(fpsDc, fpsOldBitmap);
@@ -1007,7 +1041,9 @@ bool CreateHudTexture()
     g_lastRenderedLiveFps = -1;
     g_lastRenderedLiveObsFps = -1;
     g_lastRenderedSessionSeconds = -1;
+    g_lastRenderedAudioLevels = -1;
     InterlockedExchange(&g_shared->liveSessionSecondsAck, 0);
+    InterlockedExchange(&g_shared->liveAudioLevelsAck, 0);
     return true;
 }
 
@@ -1052,7 +1088,7 @@ void UpdateLiveFpsTexture()
         kFpsPatchX,
         kFpsPatchY,
         kFpsPatchWidth,
-        kFpsPatchHeight,
+        kFpsUploadHeight,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
         g_liveFpsPatches[
@@ -1269,6 +1305,119 @@ void UpdateLiveSessionTimerTexture()
     SetDrawStage(DrawStageLiveTimerUploadDone);
 }
 
+void UpdateLiveAudioMetersTexture()
+{
+    if (!g_shared ||
+        !g_hudTexture ||
+        g_audioBasePatch.empty()) {
+        return;
+    }
+
+    const LONG packedAudio =
+        InterlockedCompareExchange(
+            &g_shared->liveAudioLevels,
+            0,
+            0);
+    if (packedAudio == g_lastRenderedAudioLevels)
+        return;
+
+    const int desktopValue =
+        static_cast<int>(
+            static_cast<std::uint32_t>(packedAudio) & 0xFFFFu);
+    const int micValue =
+        static_cast<int>(
+            (static_cast<std::uint32_t>(packedAudio) >> 16) &
+            0xFFFFu);
+
+    const int desktopActive =
+        std::clamp(
+            (desktopValue * kAudioSegments + 999) / 1000,
+            0,
+            kAudioSegments);
+    const int micActive =
+        std::clamp(
+            (micValue * kAudioSegments + 999) / 1000,
+            0,
+            kAudioSegments);
+
+    g_audioScratch = g_audioBasePatch;
+
+    const auto paintMeter =
+        [&](int meterX, int activeSegments) {
+            for (int i = 0; i < kAudioSegments; ++i) {
+                const int sy =
+                    25 -
+                    i * (kAudioSegmentHeight +
+                         kAudioSegmentGap);
+                const bool active = i < activeSegments;
+                const std::uint8_t r = active ? 31 : 49;
+                const std::uint8_t g = active ? 218 : 55;
+                const std::uint8_t b = active ? 102 : 59;
+
+                for (int y = 0;
+                     y < kAudioSegmentHeight;
+                     ++y) {
+                    for (int x = 0; x < 3; ++x) {
+                        const int px = meterX + x;
+                        const int py = sy + y;
+                        if (px < 0 ||
+                            px >= kAudioPatchWidth ||
+                            py < 0 ||
+                            py >= kAudioPatchHeight) {
+                            continue;
+                        }
+
+                        const size_t index =
+                            (static_cast<size_t>(py) *
+                                 kAudioPatchWidth +
+                             static_cast<size_t>(px)) *
+                            4;
+                        g_audioScratch[index + 0] = r;
+                        g_audioScratch[index + 1] = g;
+                        g_audioScratch[index + 2] = b;
+                        g_audioScratch[index + 3] = 255;
+                    }
+                }
+            }
+        };
+
+    paintMeter(1, desktopActive);
+    paintMeter(13, micActive);
+
+    SetDrawStage(DrawStageLiveAudioUploadEntry);
+
+    GLint oldTexture = 0;
+    GLint oldUnpackAlignment = 4;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &oldUnpackAlignment);
+
+    glBindTexture(GL_TEXTURE_2D, g_hudTexture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(
+        GL_TEXTURE_2D,
+        0,
+        kAudioPatchX,
+        kAudioPatchY,
+        kAudioPatchWidth,
+        kAudioPatchHeight,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        g_audioScratch.data());
+
+    glPixelStorei(
+        GL_UNPACK_ALIGNMENT,
+        oldUnpackAlignment);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        static_cast<GLuint>(oldTexture));
+
+    g_lastRenderedAudioLevels = packedAudio;
+    InterlockedExchange(
+        &g_shared->liveAudioLevelsAck,
+        packedAudio);
+    SetDrawStage(DrawStageLiveAudioUploadDone);
+}
+
 bool EnsureModernHudRenderer()
 {
     const HGLRC context = wglGetCurrentContext();
@@ -1415,6 +1564,7 @@ void DrawStaticHud(HDC dc)
     UpdateLiveFpsTexture();
     UpdateLiveObsFpsTexture();
     UpdateLiveSessionTimerTexture();
+    UpdateLiveAudioMetersTexture();
 
     GLint viewport[4] = {};
     glGetIntegerv(GL_VIEWPORT, viewport);
