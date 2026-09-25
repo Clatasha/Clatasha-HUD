@@ -176,7 +176,7 @@ constexpr int kHudHeight = 50;
 constexpr int kHudMargin = 12;
 
 constexpr std::uint32_t kHudFrameMagic = 0x52464843; // CHFR
-constexpr std::uint32_t kHudFrameVersion = 1;
+constexpr std::uint32_t kHudFrameVersion = 2;
 constexpr int kHudFrameStride = kHudWidth * 4;
 constexpr int kHudFrameBytes = kHudFrameStride * kHudHeight;
 
@@ -1852,10 +1852,12 @@ bool CreateHudTexture()
         return false;
 
     glBindTexture(GL_TEXTURE_2D, g_hudTexture);
+    // The HUD is uploaded and drawn at its exact native 145x50 size.
+    // Point sampling prevents the compositor from softening text/edges.
     glTexParameteri(
-        GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(
-        GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(
         GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(
@@ -3073,7 +3075,17 @@ void DrawStaticHud(HDC dc)
     // HUD to be gamma-converted a second time and makes dark UI look pale.
     glDisable(GL_FRAMEBUFFER_SRGB);
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (g_usingSharedHudFrame) {
+        // Shared Qt frames are RGBA premultiplied.
+        glBlendFunc(
+            GL_ONE,
+            GL_ONE_MINUS_SRC_ALPHA);
+    } else {
+        // Legacy fallback texture is straight alpha.
+        glBlendFunc(
+            GL_SRC_ALPHA,
+            GL_ONE_MINUS_SRC_ALPHA);
+    }
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     SetDrawStage(DrawStageOverlayStateApplied);
 
