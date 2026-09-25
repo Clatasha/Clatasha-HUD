@@ -11,6 +11,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cwchar>
@@ -19,7 +20,7 @@
 namespace {
 
 constexpr std::uint32_t kSharedMagic = 0x4C474F43; // "COGL"
-constexpr std::uint32_t kSharedVersion = 5;
+constexpr std::uint32_t kSharedVersion = 6;
 
 enum HookBits : LONG {
     HookSwapBuffers = 1 << 0,
@@ -41,7 +42,9 @@ enum DrawStage : LONG {
     DrawStageLiveTimerUploadDone = 26,
     DrawStageLiveAudioUploadEntry = 27,
     DrawStageLiveAudioUploadDone = 28,
+    DrawStageLiveStatusUploadEntry = 29,
     DrawStageViewportReady = 30,
+    DrawStageLiveStatusUploadDone = 31,
     DrawStageStateCaptured = 40,
     DrawStageOverlayStateApplied = 50,
     DrawStageVerticesUploaded = 60,
@@ -69,6 +72,8 @@ struct alignas(8) OpenGlPresentShared {
     volatile LONG liveSessionSecondsAck; // last timer value uploaded by renderer
     volatile LONG liveAudioLevels; // desktop low16, mic high16, each 0..1000
     volatile LONG liveAudioLevelsAck;
+    volatile LONG liveHudStatus; // disk, session flags, opacity
+    volatile LONG liveHudStatusAck;
 };
 
 using SwapBuffersFn = BOOL (WINAPI *)(HDC);
@@ -184,6 +189,23 @@ constexpr int kAudioPatchHeight = 29;
 constexpr int kAudioSegments = 6;
 constexpr int kAudioSegmentHeight = 4;
 constexpr int kAudioSegmentGap = 1;
+constexpr int kDiskPatchX = 94;
+constexpr int kDiskPatchY = 37;
+constexpr int kDiskPatchWidth = 38;
+constexpr int kDiskPatchHeight = 11;
+constexpr int kDiskGlyphWidth = 6;
+constexpr int kDiskGlyphHeight = 11;
+constexpr int kDiskGlyphAdvance = 5;
+constexpr int kDiskGlyphCount = 14;
+constexpr int kStatePatchX = 101;
+constexpr int kStatePatchY = 16;
+constexpr int kStatePatchWidth = 42;
+constexpr int kStatePatchHeight = 21;
+constexpr std::uint32_t kHudStatusDiskMask = 0x000FFFFFu;
+constexpr std::uint32_t kHudStatusRecordingBit = 1u << 20;
+constexpr std::uint32_t kHudStatusStreamingBit = 1u << 21;
+constexpr std::uint32_t kHudStatusReplayBit = 1u << 22;
+constexpr std::uint32_t kHudStatusOpacityShift = 23;
 constexpr int kMaxCachedFps = 999;
 constexpr LONG kMaxTimerSeconds = 359999; // 99:59:59
 
@@ -197,10 +219,20 @@ std::vector<std::uint8_t> g_timerBasePatch;
 std::vector<std::uint8_t> g_timerScratch;
 std::vector<std::uint8_t> g_audioBasePatch;
 std::vector<std::uint8_t> g_audioScratch;
+std::vector<std::uint8_t> g_liveFpsScratch;
+std::vector<std::vector<std::uint8_t>> g_diskGlyphs;
+std::vector<std::uint8_t> g_diskBasePatch;
+std::vector<std::uint8_t> g_diskScratch;
+std::vector<std::uint8_t> g_stateBasePatch;
+std::vector<std::uint8_t> g_stateScratch;
 LONG g_lastRenderedLiveFps = -1;
 LONG g_lastRenderedLiveObsFps = -1;
 LONG g_lastRenderedSessionSeconds = -1;
 LONG g_lastRenderedAudioLevels = -1;
+LONG g_lastRenderedHudStatus = -1;
+LONG g_lastRenderedDiskTenths = -1;
+bool g_lastRenderedSessionActive = false;
+ULONGLONG g_lastStatusAnimationTick = 0;
 
 bool ShouldDrawOverlay(HDC dc)
 {
@@ -337,15 +369,9 @@ bool BuildStaticHudPixels()
         CreateSolidBrush(RGB(158, 164, 169));
     SelectObject(dc, dotBrush);
     SelectObject(dc, GetStockObject(NULL_PEN));
-    Ellipse(dc, 102, 22, 106, 26);
-    Ellipse(dc, 108, 22, 112, 26);
-    Ellipse(dc, 114, 22, 118, 26);
+    // Activity dots/ring and disk text are dynamic in fullscreen mode.
 
     SetTextColor(dc, RGB(165, 171, 176));
-    RECT diskRect{94, 36, 135, 49};
-    DrawTextW(
-        dc, L"123 GB", -1, &diskRect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     HPEN iconPen =
         CreatePen(PS_SOLID, 1, RGB(174, 181, 187));
@@ -736,6 +762,108 @@ bool BuildStaticHudPixels()
     }
     g_audioScratch = g_audioBasePatch;
 
+    g_diskBasePatch.resize(
+        static_cast<size_t>(kDiskPatchWidth) *
+        static_cast<size_t>(kDiskPatchHeight) * 4);
+    for (int y = 0; y < kDiskPatchHeight; ++y) {
+        for (int x = 0; x < kDiskPatchWidth; ++x) {
+            const size_t srcIndex =
+                (static_cast<size_t>(y + kDiskPatchY) * kHudWidth +
+                 static_cast<size_t>(x + kDiskPatchX)) * 4;
+            const size_t dstIndex =
+                (static_cast<size_t>(y) * kDiskPatchWidth +
+                 static_cast<size_t>(x)) * 4;
+            g_diskBasePatch[dstIndex + 0] = g_hudPixels[srcIndex + 0];
+            g_diskBasePatch[dstIndex + 1] = g_hudPixels[srcIndex + 1];
+            g_diskBasePatch[dstIndex + 2] = g_hudPixels[srcIndex + 2];
+            g_diskBasePatch[dstIndex + 3] = g_hudPixels[srcIndex + 3];
+        }
+    }
+    g_diskScratch = g_diskBasePatch;
+
+    SelectObject(fpsDc, tinyFont);
+    SetBkMode(fpsDc, TRANSPARENT);
+    SetTextColor(fpsDc, RGB(165, 171, 176));
+    g_diskGlyphs.clear();
+    g_diskGlyphs.resize(kDiskGlyphCount);
+
+    const wchar_t diskChars[kDiskGlyphCount] = {
+        L'0', L'1', L'2', L'3', L'4',
+        L'5', L'6', L'7', L'8', L'9',
+        L'.', L' ', L'G', L'B'};
+
+    for (int glyphIndex = 0;
+         glyphIndex < kDiskGlyphCount;
+         ++glyphIndex) {
+        ZeroMemory(
+            fpsBits,
+            static_cast<SIZE_T>(kFpsPatchWidth) *
+                static_cast<SIZE_T>(kFpsPatchHeight) * 4);
+
+        RECT glyphRect{
+            0, 0,
+            kDiskGlyphWidth,
+            kDiskGlyphHeight};
+        DrawTextW(
+            fpsDc,
+            &diskChars[glyphIndex],
+            1,
+            &glyphRect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        auto &glyph =
+            g_diskGlyphs[static_cast<size_t>(glyphIndex)];
+        glyph.resize(
+            static_cast<size_t>(kDiskGlyphWidth) *
+            static_cast<size_t>(kDiskGlyphHeight) * 4);
+
+        for (int y = 0; y < kDiskGlyphHeight; ++y) {
+            for (int x = 0; x < kDiskGlyphWidth; ++x) {
+                const size_t srcIndex =
+                    (static_cast<size_t>(y) * kFpsPatchWidth +
+                     static_cast<size_t>(x)) * 4;
+                const size_t dstIndex =
+                    (static_cast<size_t>(y) * kDiskGlyphWidth +
+                     static_cast<size_t>(x)) * 4;
+                const std::uint8_t b = fpsSource[srcIndex + 0];
+                const std::uint8_t g = fpsSource[srcIndex + 1];
+                const std::uint8_t r = fpsSource[srcIndex + 2];
+                const int coverage =
+                    std::max<int>(r, std::max<int>(g, b));
+                const std::uint8_t alpha =
+                    static_cast<std::uint8_t>(
+                        std::min(255, coverage * 255 / 176));
+
+                glyph[dstIndex + 0] = 165;
+                glyph[dstIndex + 1] = 171;
+                glyph[dstIndex + 2] = 176;
+                glyph[dstIndex + 3] = alpha;
+            }
+        }
+    }
+
+    g_stateBasePatch.resize(
+        static_cast<size_t>(kStatePatchWidth) *
+        static_cast<size_t>(kStatePatchHeight) * 4);
+    for (int y = 0; y < kStatePatchHeight; ++y) {
+        for (int x = 0; x < kStatePatchWidth; ++x) {
+            const size_t srcIndex =
+                (static_cast<size_t>(y + kStatePatchY) * kHudWidth +
+                 static_cast<size_t>(x + kStatePatchX)) * 4;
+            const size_t dstIndex =
+                (static_cast<size_t>(y) * kStatePatchWidth +
+                 static_cast<size_t>(x)) * 4;
+            g_stateBasePatch[dstIndex + 0] = g_hudPixels[srcIndex + 0];
+            g_stateBasePatch[dstIndex + 1] = g_hudPixels[srcIndex + 1];
+            g_stateBasePatch[dstIndex + 2] = g_hudPixels[srcIndex + 2];
+            g_stateBasePatch[dstIndex + 3] = g_hudPixels[srcIndex + 3];
+        }
+    }
+    g_stateScratch = g_stateBasePatch;
+    g_liveFpsScratch.resize(
+        static_cast<size_t>(kFpsPatchWidth) *
+        static_cast<size_t>(kFpsPatchHeight) * 4);
+
     SelectObject(fpsDc, fpsOldFont);
     SelectObject(fpsDc, fpsOldBitmap);
     DeleteObject(fpsBitmap);
@@ -1042,8 +1170,13 @@ bool CreateHudTexture()
     g_lastRenderedLiveObsFps = -1;
     g_lastRenderedSessionSeconds = -1;
     g_lastRenderedAudioLevels = -1;
+    g_lastRenderedHudStatus = -1;
+    g_lastRenderedDiskTenths = -1;
+    g_lastRenderedSessionActive = false;
+    g_lastStatusAnimationTick = 0;
     InterlockedExchange(&g_shared->liveSessionSecondsAck, 0);
     InterlockedExchange(&g_shared->liveAudioLevelsAck, 0);
+    InterlockedExchange(&g_shared->liveHudStatusAck, 0);
     return true;
 }
 
@@ -1070,8 +1203,22 @@ void UpdateLiveFpsTexture()
             receivedFps,
             0,
             kMaxCachedFps);
-    if (clampedFps == g_lastRenderedLiveFps)
+
+    const std::uint32_t packedStatus =
+        static_cast<std::uint32_t>(
+            InterlockedCompareExchange(
+                &g_shared->liveHudStatus,
+                0,
+                0));
+    const bool sessionActive =
+        (packedStatus &
+         (kHudStatusRecordingBit |
+          kHudStatusStreamingBit)) != 0;
+
+    if (clampedFps == g_lastRenderedLiveFps &&
+        sessionActive == g_lastRenderedSessionActive) {
         return;
+    }
 
     SetDrawStage(DrawStageLiveFpsUploadEntry);
 
@@ -1079,6 +1226,39 @@ void UpdateLiveFpsTexture()
     GLint oldUnpackAlignment = 4;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture);
     glGetIntegerv(GL_UNPACK_ALIGNMENT, &oldUnpackAlignment);
+
+    const auto &sourcePatch =
+        g_liveFpsPatches[
+            static_cast<size_t>(clampedFps)];
+    const std::uint8_t *fpsPixels = sourcePatch.data();
+
+    if (sessionActive) {
+        g_liveFpsScratch = sourcePatch;
+        for (size_t i = 0;
+             i + 3 < g_liveFpsScratch.size();
+             i += 4) {
+            const int r = g_liveFpsScratch[i + 0];
+            const int g = g_liveFpsScratch[i + 1];
+            const int b = g_liveFpsScratch[i + 2];
+            if (b > r + 25 && b > g + 20) {
+                const int strength =
+                    std::clamp((b - r) * 255 / 210, 0, 255);
+                g_liveFpsScratch[i + 0] =
+                    static_cast<std::uint8_t>(
+                        (r * (255 - strength) +
+                         232 * strength) / 255);
+                g_liveFpsScratch[i + 1] =
+                    static_cast<std::uint8_t>(
+                        (g * (255 - strength) +
+                         24 * strength) / 255);
+                g_liveFpsScratch[i + 2] =
+                    static_cast<std::uint8_t>(
+                        (b * (255 - strength) +
+                         43 * strength) / 255);
+            }
+        }
+        fpsPixels = g_liveFpsScratch.data();
+    }
 
     glBindTexture(GL_TEXTURE_2D, g_hudTexture);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -1091,8 +1271,7 @@ void UpdateLiveFpsTexture()
         kFpsUploadHeight,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
-        g_liveFpsPatches[
-            static_cast<size_t>(clampedFps)].data());
+        fpsPixels);
 
     glPixelStorei(
         GL_UNPACK_ALIGNMENT,
@@ -1102,6 +1281,7 @@ void UpdateLiveFpsTexture()
         static_cast<GLuint>(oldTexture));
 
     g_lastRenderedLiveFps = clampedFps;
+    g_lastRenderedSessionActive = sessionActive;
     SetDrawStage(DrawStageLiveFpsUploadDone);
 }
 
@@ -1418,6 +1598,399 @@ void UpdateLiveAudioMetersTexture()
     SetDrawStage(DrawStageLiveAudioUploadDone);
 }
 
+void UpdateLiveHudStatusTexture()
+{
+    if (!g_shared ||
+        !g_hudTexture ||
+        g_diskGlyphs.size() != kDiskGlyphCount ||
+        g_diskBasePatch.empty() ||
+        g_stateBasePatch.empty()) {
+        return;
+    }
+
+    const LONG packedStatusLong =
+        InterlockedCompareExchange(
+            &g_shared->liveHudStatus,
+            0,
+            0);
+    const std::uint32_t packedStatus =
+        static_cast<std::uint32_t>(packedStatusLong);
+
+    const LONG diskTenths =
+        static_cast<LONG>(
+            packedStatus & kHudStatusDiskMask);
+    const bool recording =
+        (packedStatus & kHudStatusRecordingBit) != 0;
+    const bool streaming =
+        (packedStatus & kHudStatusStreamingBit) != 0;
+    const bool replay =
+        (packedStatus & kHudStatusReplayBit) != 0;
+    const bool sessionActive = recording || streaming;
+
+    const ULONGLONG now = GetTickCount64();
+    const bool animationDue =
+        (sessionActive || replay) &&
+        (g_lastStatusAnimationTick == 0 ||
+         now - g_lastStatusAnimationTick >= 100);
+    const bool statusChanged =
+        packedStatusLong != g_lastRenderedHudStatus;
+
+    if (!statusChanged && !animationDue)
+        return;
+
+    SetDrawStage(DrawStageLiveStatusUploadEntry);
+
+    GLint oldTexture = 0;
+    GLint oldUnpackAlignment = 4;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &oldUnpackAlignment);
+    glBindTexture(GL_TEXTURE_2D, g_hudTexture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+    if (diskTenths != g_lastRenderedDiskTenths) {
+        g_diskScratch = g_diskBasePatch;
+
+        LONG displayTenths =
+            std::clamp<LONG>(
+                diskTenths,
+                0,
+                99990);
+        wchar_t diskText[16] = {};
+        if (displayTenths >= 1000) {
+            const LONG wholeGiB =
+                (displayTenths + 5) / 10;
+            swprintf_s(
+                diskText,
+                L"%ld GB",
+                wholeGiB);
+        } else {
+            swprintf_s(
+                diskText,
+                L"%ld.%ld GB",
+                displayTenths / 10,
+                displayTenths % 10);
+        }
+
+        const auto glyphIndexFor =
+            [](wchar_t ch) -> int {
+                if (ch >= L'0' && ch <= L'9')
+                    return static_cast<int>(ch - L'0');
+                if (ch == L'.')
+                    return 10;
+                if (ch == L' ')
+                    return 11;
+                if (ch == L'G')
+                    return 12;
+                if (ch == L'B')
+                    return 13;
+                return -1;
+            };
+
+        const size_t textLength =
+            std::wcslen(diskText);
+        const int textWidth =
+            textLength > 0
+                ? (static_cast<int>(textLength) - 1) *
+                      kDiskGlyphAdvance +
+                      kDiskGlyphWidth
+                : 0;
+        const int startX =
+            std::max(
+                0,
+                (kDiskPatchWidth - textWidth) / 2);
+
+        for (size_t charIndex = 0;
+             charIndex < textLength;
+             ++charIndex) {
+            const int glyphIndex =
+                glyphIndexFor(diskText[charIndex]);
+            if (glyphIndex < 0)
+                continue;
+
+            const auto &glyph =
+                g_diskGlyphs[
+                    static_cast<size_t>(glyphIndex)];
+            const int dstX =
+                startX +
+                static_cast<int>(charIndex) *
+                    kDiskGlyphAdvance;
+
+            for (int y = 0;
+                 y < kDiskGlyphHeight;
+                 ++y) {
+                for (int x = 0;
+                     x < kDiskGlyphWidth;
+                     ++x) {
+                    const int px = dstX + x;
+                    if (px < 0 ||
+                        px >= kDiskPatchWidth) {
+                        continue;
+                    }
+
+                    const size_t srcIndex =
+                        (static_cast<size_t>(y) *
+                             kDiskGlyphWidth +
+                         static_cast<size_t>(x)) * 4;
+                    const std::uint8_t alpha =
+                        glyph[srcIndex + 3];
+                    if (alpha == 0)
+                        continue;
+
+                    const size_t dstIndex =
+                        (static_cast<size_t>(y) *
+                             kDiskPatchWidth +
+                         static_cast<size_t>(px)) * 4;
+                    const int inverseAlpha =
+                        255 - alpha;
+
+                    for (int channel = 0;
+                         channel < 3;
+                         ++channel) {
+                        g_diskScratch[
+                            dstIndex + channel] =
+                            static_cast<std::uint8_t>(
+                                (static_cast<int>(
+                                     glyph[
+                                         srcIndex +
+                                         channel]) *
+                                     alpha +
+                                 static_cast<int>(
+                                     g_diskScratch[
+                                         dstIndex +
+                                         channel]) *
+                                     inverseAlpha) /
+                                255);
+                    }
+                    g_diskScratch[dstIndex + 3] =
+                        std::max(
+                            g_diskScratch[dstIndex + 3],
+                            alpha);
+                }
+            }
+        }
+
+        glTexSubImage2D(
+            GL_TEXTURE_2D,
+            0,
+            kDiskPatchX,
+            kDiskPatchY,
+            kDiskPatchWidth,
+            kDiskPatchHeight,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            g_diskScratch.data());
+        g_lastRenderedDiskTenths = diskTenths;
+    }
+
+    if (statusChanged || animationDue) {
+        g_stateScratch = g_stateBasePatch;
+
+        const auto setPixel =
+            [&](int x,
+                int y,
+                std::uint8_t r,
+                std::uint8_t g,
+                std::uint8_t b,
+                std::uint8_t a = 255) {
+                if (x < 0 ||
+                    x >= kStatePatchWidth ||
+                    y < 0 ||
+                    y >= kStatePatchHeight) {
+                    return;
+                }
+                const size_t index =
+                    (static_cast<size_t>(y) *
+                         kStatePatchWidth +
+                     static_cast<size_t>(x)) * 4;
+                const int inverseAlpha =
+                    255 - a;
+                g_stateScratch[index + 0] =
+                    static_cast<std::uint8_t>(
+                        (r * a +
+                         g_stateScratch[index + 0] *
+                             inverseAlpha) /
+                        255);
+                g_stateScratch[index + 1] =
+                    static_cast<std::uint8_t>(
+                        (g * a +
+                         g_stateScratch[index + 1] *
+                             inverseAlpha) /
+                        255);
+                g_stateScratch[index + 2] =
+                    static_cast<std::uint8_t>(
+                        (b * a +
+                         g_stateScratch[index + 2] *
+                             inverseAlpha) /
+                        255);
+                g_stateScratch[index + 3] =
+                    std::max(
+                        g_stateScratch[index + 3],
+                        a);
+            };
+
+        const double centerX =
+            110.0 - kStatePatchX;
+        const double centerY =
+            24.0 - kStatePatchY;
+
+        if (sessionActive) {
+            const double phase =
+                std::fmod(
+                    static_cast<double>(now) *
+                        0.18,
+                    360.0);
+            constexpr double kPi =
+                3.14159265358979323846;
+
+            for (int y = 0;
+                 y < kStatePatchHeight;
+                 ++y) {
+                for (int x = 0;
+                     x < kStatePatchWidth;
+                     ++x) {
+                    const double dx =
+                        (x + 0.5) - centerX;
+                    const double dy =
+                        (y + 0.5) - centerY;
+                    const double radius =
+                        std::sqrt(dx * dx + dy * dy);
+                    if (radius < 7.0 ||
+                        radius > 9.0) {
+                        continue;
+                    }
+
+                    double angle =
+                        std::atan2(-dy, dx) *
+                        180.0 / kPi;
+                    if (angle < 0.0)
+                        angle += 360.0;
+
+                    double relative =
+                        std::fmod(
+                            angle - phase + 360.0,
+                            360.0);
+                    if (relative <= 255.0) {
+                        setPixel(
+                            x, y,
+                            226, 25, 47);
+                    }
+                }
+            }
+        } else {
+            const int dotXs[] = {3, 9, 15};
+            const int dotY = 8;
+            for (int dotX : dotXs) {
+                for (int y = dotY - 2;
+                     y <= dotY + 2;
+                     ++y) {
+                    for (int x = dotX - 2;
+                         x <= dotX + 2;
+                         ++x) {
+                        const int dx = x - dotX;
+                        const int dy = y - dotY;
+                        if (dx * dx + dy * dy <= 3) {
+                            setPixel(
+                                x, y,
+                                158, 164, 169);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (replay) {
+            const double shimmer =
+                (std::sin(
+                     static_cast<double>(now) *
+                     0.012) +
+                 1.0) *
+                0.5;
+            const std::uint8_t boltR = 255;
+            const std::uint8_t boltG =
+                static_cast<std::uint8_t>(
+                    190 + 40 * shimmer);
+            const std::uint8_t boltB = 55;
+
+            const double polygon[6][2] = {
+                {34.4, 5.0},
+                {29.7, 13.4},
+                {33.2, 13.4},
+                {31.4, 20.0},
+                {38.4, 11.1},
+                {34.8, 11.1},
+            };
+
+            for (int y = 3;
+                 y < kStatePatchHeight;
+                 ++y) {
+                for (int x = 27;
+                     x < kStatePatchWidth;
+                     ++x) {
+                    const double px = x + 0.5;
+                    const double py = y + 0.5;
+                    bool inside = false;
+                    for (int i = 0, j = 5;
+                         i < 6;
+                         j = i++) {
+                        const double xi =
+                            polygon[i][0];
+                        const double yi =
+                            polygon[i][1];
+                        const double xj =
+                            polygon[j][0];
+                        const double yj =
+                            polygon[j][1];
+
+                        const bool intersects =
+                            ((yi > py) != (yj > py)) &&
+                            (px <
+                             (xj - xi) *
+                                     (py - yi) /
+                                     (yj - yi) +
+                                 xi);
+                        if (intersects)
+                            inside = !inside;
+                    }
+                    if (inside) {
+                        setPixel(
+                            x, y,
+                            boltR,
+                            boltG,
+                            boltB);
+                    }
+                }
+            }
+        }
+
+        glTexSubImage2D(
+            GL_TEXTURE_2D,
+            0,
+            kStatePatchX,
+            kStatePatchY,
+            kStatePatchWidth,
+            kStatePatchHeight,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            g_stateScratch.data());
+
+        g_lastStatusAnimationTick = now;
+    }
+
+    glPixelStorei(
+        GL_UNPACK_ALIGNMENT,
+        oldUnpackAlignment);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        static_cast<GLuint>(oldTexture));
+
+    g_lastRenderedHudStatus =
+        packedStatusLong;
+    InterlockedExchange(
+        &g_shared->liveHudStatusAck,
+        packedStatusLong);
+    SetDrawStage(DrawStageLiveStatusUploadDone);
+}
+
 bool EnsureModernHudRenderer()
 {
     const HGLRC context = wglGetCurrentContext();
@@ -1565,6 +2138,7 @@ void DrawStaticHud(HDC dc)
     UpdateLiveObsFpsTexture();
     UpdateLiveSessionTimerTexture();
     UpdateLiveAudioMetersTexture();
+    UpdateLiveHudStatusTexture();
 
     GLint viewport[4] = {};
     glGetIntegerv(GL_VIEWPORT, viewport);
