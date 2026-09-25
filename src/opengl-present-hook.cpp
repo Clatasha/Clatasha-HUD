@@ -6,17 +6,12 @@
 #include <detours.h>
 #include <GL/gl.h>
 
-#include "hud-telemetry.hpp"
-
 #ifndef APIENTRYP
 #define APIENTRYP APIENTRY *
 #endif
 
-#include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <cwchar>
 #include <vector>
 
@@ -125,12 +120,6 @@ GLuint g_hudTexture = 0;
 HGLRC g_hudTextureContext = nullptr;
 std::vector<std::uint8_t> g_hudPixels;
 
-HANDLE g_hudTelemetryMapping = nullptr;
-clatasha::HudTelemetryShared *g_hudTelemetry = nullptr;
-LONG g_lastHudTelemetrySequence = -1;
-ULONGLONG g_lastHudTelemetryPoll = 0;
-std::int32_t g_hudLocation = clatasha::HudTopRight;
-
 bool ShouldDrawOverlay(HDC dc)
 {
     if (!g_shared ||
@@ -143,95 +132,221 @@ bool ShouldDrawOverlay(HDC dc)
     if (wglGetCurrentDC() != dc)
         return false;
 
-    // The helper owns fullscreen qualification and applies hysteresis before
-    // arming drawMarker. Do not repeat the fragile monitor-geometry test here;
-    // only confirm that this OpenGL surface belongs to the foreground process.
-    const HWND hwnd = WindowFromDC(dc);
-    const HWND foreground = GetForegroundWindow();
-    if (!hwnd || !foreground ||
-        !IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd)) {
-        return false;
-    }
-
-    DWORD windowPid = 0;
-    DWORD foregroundPid = 0;
-    GetWindowThreadProcessId(hwnd, &windowPid);
-    GetWindowThreadProcessId(foreground, &foregroundPid);
-
-    const DWORD selfPid = GetCurrentProcessId();
-    return windowPid == selfPid && foregroundPid == selfPid;
+    return IsFullscreenWindow(WindowFromDC(dc));
 }
 
-bool OpenHudTelemetry()
+void DrawMeter(HDC dc, int x, int y)
 {
-    if (g_hudTelemetry)
+    constexpr int segments = 6;
+    constexpr int segmentHeight = 4;
+    constexpr int gap = 1;
+
+    HBRUSH active = CreateSolidBrush(RGB(31, 218, 102));
+    HBRUSH inactive = CreateSolidBrush(RGB(49, 55, 59));
+
+    for (int i = 0; i < segments; ++i) {
+        const int sy = y + 29 - segmentHeight -
+                       i * (segmentHeight + gap);
+        RECT r{x, sy, x + 3, sy + segmentHeight};
+        FillRect(dc, &r, i < 4 ? active : inactive);
+    }
+
+    DeleteObject(active);
+    DeleteObject(inactive);
+}
+
+bool BuildStaticHudPixels()
+{
+    if (!g_hudPixels.empty())
         return true;
 
-    g_hudTelemetryMapping =
-        OpenFileMappingW(
-            FILE_MAP_READ,
-            FALSE,
-            clatasha::kHudTelemetryMappingName);
-    if (!g_hudTelemetryMapping)
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc)
         return false;
 
-    g_hudTelemetry =
-        static_cast<clatasha::HudTelemetryShared *>(
-            MapViewOfFile(
-                g_hudTelemetryMapping,
-                FILE_MAP_READ,
-                0,
-                0,
-                sizeof(clatasha::HudTelemetryShared)));
-    if (!g_hudTelemetry) {
-        CloseHandle(g_hudTelemetryMapping);
-        g_hudTelemetryMapping = nullptr;
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = kHudWidth;
+    info.bmiHeader.biHeight = -kHudHeight;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void *bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(
+        dc,
+        &info,
+        DIB_RGB_COLORS,
+        &bits,
+        nullptr,
+        0);
+    if (!bitmap || !bits) {
+        if (bitmap)
+            DeleteObject(bitmap);
+        DeleteDC(dc);
         return false;
     }
 
-    if (g_hudTelemetry->magic != clatasha::kHudTelemetryMagic ||
-        g_hudTelemetry->version != clatasha::kHudTelemetryVersion) {
-        UnmapViewOfFile(g_hudTelemetry);
-        g_hudTelemetry = nullptr;
-        CloseHandle(g_hudTelemetryMapping);
-        g_hudTelemetryMapping = nullptr;
-        return false;
+    HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
+    ZeroMemory(
+        bits,
+        static_cast<SIZE_T>(kHudWidth) *
+            static_cast<SIZE_T>(kHudHeight) * 4);
+
+    HPEN borderPen =
+        CreatePen(PS_SOLID, 1, RGB(100, 109, 116));
+    HBRUSH panelBrush =
+        CreateSolidBrush(RGB(8, 10, 12));
+    HGDIOBJ oldPen = SelectObject(dc, borderPen);
+    HGDIOBJ oldBrush = SelectObject(dc, panelBrush);
+    RoundRect(dc, 0, 0, kHudWidth, kHudHeight, 8, 8);
+
+    DrawMeter(dc, 5, 5);
+    DrawMeter(dc, 17, 5);
+
+    SetBkMode(dc, TRANSPARENT);
+
+    HFONT fpsFont = CreateFontW(
+        -29, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT smallBold = CreateFontW(
+        -12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT tinyFont = CreateFontW(
+        -9, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    HFONT oldFont =
+        static_cast<HFONT>(SelectObject(dc, fpsFont));
+    SetTextColor(dc, RGB(45, 143, 255));
+    RECT fpsRect{22, -2, 75, 34};
+    DrawTextW(
+        dc, L"60", -1, &fpsRect,
+        DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+    SelectObject(dc, smallBold);
+    SetTextColor(dc, RGB(165, 171, 176));
+    RECT obsRect{74, 3, 103, 25};
+    DrawTextW(
+        dc, L"/60", -1, &obsRect,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    HBRUSH badgeBrush =
+        CreateSolidBrush(RGB(22, 27, 32));
+    HPEN badgePen =
+        CreatePen(PS_SOLID, 1, RGB(96, 106, 116));
+    SelectObject(dc, badgeBrush);
+    SelectObject(dc, badgePen);
+    RoundRect(dc, 102, 2, 126, 13, 4, 4);
+
+    SelectObject(dc, tinyFont);
+    SetTextColor(dc, RGB(210, 216, 221));
+    RECT oglRect{102, 2, 126, 13};
+    DrawTextW(
+        dc, L"OGL", -1, &oglRect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    SetTextColor(dc, RGB(205, 209, 212));
+    RECT timerRect{23, 28, 92, 44};
+    DrawTextW(
+        dc, L"0:12:34", -1, &timerRect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    HBRUSH dotBrush =
+        CreateSolidBrush(RGB(158, 164, 169));
+    SelectObject(dc, dotBrush);
+    SelectObject(dc, GetStockObject(NULL_PEN));
+    Ellipse(dc, 102, 22, 106, 26);
+    Ellipse(dc, 108, 22, 112, 26);
+    Ellipse(dc, 114, 22, 118, 26);
+
+    SetTextColor(dc, RGB(165, 171, 176));
+    RECT diskRect{94, 36, 135, 49};
+    DrawTextW(
+        dc, L"123 GB", -1, &diskRect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    HPEN iconPen =
+        CreatePen(PS_SOLID, 1, RGB(174, 181, 187));
+    SelectObject(dc, iconPen);
+    SelectObject(dc, GetStockObject(NULL_BRUSH));
+    Rectangle(dc, 3, 38, 10, 43);
+    MoveToEx(dc, 6, 43, nullptr);
+    LineTo(dc, 6, 46);
+    MoveToEx(dc, 4, 46, nullptr);
+    LineTo(dc, 9, 46);
+
+    RoundRect(dc, 15, 37, 19, 43, 3, 3);
+    Arc(dc, 14, 39, 20, 45, 14, 41, 20, 41);
+    MoveToEx(dc, 17, 44, nullptr);
+    LineTo(dc, 17, 47);
+
+    HBRUSH logoBrush =
+        CreateSolidBrush(RGB(240, 243, 245));
+    SelectObject(dc, logoBrush);
+    SelectObject(dc, GetStockObject(NULL_PEN));
+    Ellipse(dc, 128, 2, 143, 17);
+
+    SelectObject(dc, smallBold);
+    SetTextColor(dc, RGB(18, 22, 26));
+    RECT logoRect{128, 1, 143, 18};
+    DrawTextW(
+        dc, L"C", -1, &logoRect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    const auto *source =
+        static_cast<const std::uint8_t *>(bits);
+    g_hudPixels.resize(
+        static_cast<size_t>(kHudWidth) *
+        static_cast<size_t>(kHudHeight) * 4);
+
+    for (int y = 0; y < kHudHeight; ++y) {
+        for (int x = 0; x < kHudWidth; ++x) {
+            const size_t index =
+                (static_cast<size_t>(y) * kHudWidth + x) * 4;
+            const std::uint8_t b = source[index + 0];
+            const std::uint8_t g = source[index + 1];
+            const std::uint8_t r = source[index + 2];
+
+            g_hudPixels[index + 0] = r;
+            g_hudPixels[index + 1] = g;
+            g_hudPixels[index + 2] = b;
+
+            if (r == 0 && g == 0 && b == 0) {
+                g_hudPixels[index + 3] = 0;
+            } else if (r <= 14 && g <= 16 && b <= 18) {
+                g_hudPixels[index + 3] = 238;
+            } else {
+                g_hudPixels[index + 3] = 255;
+            }
+        }
     }
+
+    SelectObject(dc, oldFont);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldBitmap);
+
+    DeleteObject(iconPen);
+    DeleteObject(dotBrush);
+    DeleteObject(logoBrush);
+    DeleteObject(badgePen);
+    DeleteObject(badgeBrush);
+    DeleteObject(tinyFont);
+    DeleteObject(smallBold);
+    DeleteObject(fpsFont);
+    DeleteObject(panelBrush);
+    DeleteObject(borderPen);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
 
     return true;
-}
-
-bool ReadHudTelemetry(clatasha::HudTelemetryShared &snapshot)
-{
-    if (!OpenHudTelemetry())
-        return false;
-
-    auto *sequence =
-        reinterpret_cast<volatile LONG *>(
-            &g_hudTelemetry->sequence);
-
-    for (int attempt = 0; attempt < 4; ++attempt) {
-        const LONG before =
-            InterlockedCompareExchange(sequence, 0, 0);
-        if ((before & 1) != 0) {
-            YieldProcessor();
-            continue;
-        }
-
-        std::memcpy(
-            &snapshot,
-            const_cast<const clatasha::HudTelemetryShared *>(
-                g_hudTelemetry),
-            sizeof(snapshot));
-        MemoryBarrier();
-
-        const LONG after =
-            InterlockedCompareExchange(sequence, 0, 0);
-        if (before == after && (after & 1) == 0)
-            return true;
-    }
-
-    return false;
 }
 
 using GlSizePtr = std::ptrdiff_t;
@@ -470,9 +585,8 @@ bool CreateHudProgram()
 
 bool CreateHudTexture()
 {
-    g_hudPixels.assign(
-        static_cast<size_t>(clatasha::kHudPixelBytes),
-        0);
+    if (!BuildStaticHudPixels())
+        return false;
 
     GLint oldTexture = 0;
     GLint oldUnpackAlignment = 4;
@@ -512,64 +626,6 @@ bool CreateHudTexture()
         static_cast<GLuint>(oldTexture));
 
     return true;
-}
-
-void UpdateHudTextureFromTelemetry()
-{
-    const ULONGLONG now = GetTickCount64();
-    if (g_lastHudTelemetryPoll != 0 &&
-        now - g_lastHudTelemetryPoll < 100) {
-        return;
-    }
-    g_lastHudTelemetryPoll = now;
-
-    clatasha::HudTelemetryShared snapshot{};
-    if (!ReadHudTelemetry(snapshot))
-        return;
-
-    const LONG sequence =
-        static_cast<LONG>(snapshot.sequence);
-    if (sequence == g_lastHudTelemetrySequence)
-        return;
-
-    if (snapshot.pixelWidth != clatasha::kHudPixelWidth ||
-        snapshot.pixelHeight != clatasha::kHudPixelHeight ||
-        snapshot.pixelBytes != clatasha::kHudPixelBytes) {
-        return;
-    }
-
-    g_hudLocation =
-        std::clamp(
-            static_cast<std::int32_t>(snapshot.location),
-            static_cast<std::int32_t>(clatasha::HudTopLeft),
-            static_cast<std::int32_t>(clatasha::HudBottomRight));
-
-    GLint oldTexture = 0;
-    GLint oldUnpackAlignment = 4;
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture);
-    glGetIntegerv(GL_UNPACK_ALIGNMENT, &oldUnpackAlignment);
-
-    glBindTexture(GL_TEXTURE_2D, g_hudTexture);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexSubImage2D(
-        GL_TEXTURE_2D,
-        0,
-        0,
-        0,
-        clatasha::kHudPixelWidth,
-        clatasha::kHudPixelHeight,
-        GL_RGBA,
-        GL_UNSIGNED_BYTE,
-        snapshot.rgba);
-
-    glPixelStorei(
-        GL_UNPACK_ALIGNMENT,
-        oldUnpackAlignment);
-    glBindTexture(
-        GL_TEXTURE_2D,
-        static_cast<GLuint>(oldTexture));
-
-    g_lastHudTelemetrySequence = sequence;
 }
 
 bool EnsureModernHudRenderer()
@@ -709,7 +765,6 @@ void DrawStaticHud(HDC dc)
     }
 
     InterlockedExchange(&g_shared->renderMode, 1);
-    UpdateHudTextureFromTelemetry();
 
     GLint viewport[4] = {};
     glGetIntegerv(GL_VIEWPORT, viewport);
@@ -718,27 +773,16 @@ void DrawStaticHud(HDC dc)
         return;
     }
 
-    const bool placeRight =
-        g_hudLocation == clatasha::HudTopRight ||
-        g_hudLocation == clatasha::HudBottomRight;
-    const bool placeTop =
-        g_hudLocation == clatasha::HudTopLeft ||
-        g_hudLocation == clatasha::HudTopRight;
-
     const GLfloat leftPx =
-        placeRight
-            ? static_cast<GLfloat>(
-                  viewport[2] - kHudWidth - kHudMargin)
-            : static_cast<GLfloat>(kHudMargin);
+        static_cast<GLfloat>(
+            viewport[2] - kHudWidth - kHudMargin);
     const GLfloat rightPx =
         leftPx + static_cast<GLfloat>(kHudWidth);
-    const GLfloat bottomPx =
-        placeTop
-            ? static_cast<GLfloat>(
-                  viewport[3] - kHudMargin - kHudHeight)
-            : static_cast<GLfloat>(kHudMargin);
     const GLfloat topPx =
-        bottomPx + static_cast<GLfloat>(kHudHeight);
+        static_cast<GLfloat>(
+            viewport[3] - kHudMargin);
+    const GLfloat bottomPx =
+        topPx - static_cast<GLfloat>(kHudHeight);
 
     const auto ndcX = [viewport](GLfloat px) {
         return px * 2.0f /
@@ -1048,14 +1092,6 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
         if (thread)
             CloseHandle(thread);
     } else if (reason == DLL_PROCESS_DETACH) {
-        if (g_hudTelemetry) {
-            UnmapViewOfFile(g_hudTelemetry);
-            g_hudTelemetry = nullptr;
-        }
-        if (g_hudTelemetryMapping) {
-            CloseHandle(g_hudTelemetryMapping);
-            g_hudTelemetryMapping = nullptr;
-        }
         if (g_shared) {
             UnmapViewOfFile(g_shared);
             g_shared = nullptr;
