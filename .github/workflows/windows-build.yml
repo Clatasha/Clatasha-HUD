@@ -38,12 +38,14 @@ jobs:
           Copy-Item "$pluginRoot/bin/64bit/clatasha-hud.dll" "$dist/obs-plugins/64bit/clatasha-hud.dll"
           Copy-Item "$pluginRoot/data/clatasha-fps-helper.exe" "$dist/data/obs-plugins/clatasha-hud/clatasha-fps-helper.exe"
           Copy-Item "$pluginRoot/data/clatasha-opengl-present-hook.dll" "$dist/data/obs-plugins/clatasha-hud/clatasha-opengl-present-hook.dll"
+          Copy-Item "$pluginRoot/data/clatasha-d3d11-present-hook.dll" "$dist/data/obs-plugins/clatasha-hud/clatasha-d3d11-present-hook.dll"
           Copy-Item "$pluginRoot/data/locale/en-US.ini" "$dist/data/obs-plugins/clatasha-hud/locale/en-US.ini"
 
           $required = @(
             "$dist/obs-plugins/64bit/clatasha-hud.dll",
             "$dist/data/obs-plugins/clatasha-hud/clatasha-fps-helper.exe",
             "$dist/data/obs-plugins/clatasha-hud/clatasha-opengl-present-hook.dll",
+            "$dist/data/obs-plugins/clatasha-hud/clatasha-d3d11-present-hook.dll",
             "$dist/data/obs-plugins/clatasha-hud/locale/en-US.ini"
           )
 
