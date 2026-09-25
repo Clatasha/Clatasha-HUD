@@ -97,6 +97,8 @@ private:
     int openGlDrawStage_ = 0;
     int openGlLiveFpsSent_ = 0;
     int openGlLiveFpsAck_ = 0;
+    int openGlLiveObsFpsSent_ = 0;
+    int openGlLiveObsFpsAck_ = 0;
     bool gameFullscreen_ = false;
     int rendererMissSamples_ = 0;
     int gameTargetRefreshTicks_ = 0;
