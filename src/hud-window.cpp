@@ -29,6 +29,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
 #endif
 
 namespace {
@@ -382,7 +385,30 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
                    Qt::WindowDoesNotAcceptFocus);
     setAttribute(Qt::WA_TranslucentBackground, true);
     setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    setAttribute(Qt::WA_NativeWindow, true);
     setWindowFlag(Qt::WindowTransparentForInput, true);
+
+#ifdef Q_OS_WIN
+    // Keep the desktop/display-recording HUD local to the monitor.
+    // WDA_EXCLUDEFROMCAPTURE tells Windows capture APIs not to include
+    // this top-level overlay window in monitor/display captures.
+    const HWND hudWindow =
+        reinterpret_cast<HWND>(winId());
+    if (hudWindow) {
+        if (!SetWindowDisplayAffinity(
+                hudWindow,
+                WDA_EXCLUDEFROMCAPTURE)) {
+            blog(
+                LOG_WARNING,
+                "[Clatasha HUD] Main HUD capture exclusion unavailable: %lu",
+                GetLastError());
+        } else {
+            blog(
+                LOG_INFO,
+                "[Clatasha HUD] Main HUD excluded from Windows display capture");
+        }
+    }
+#endif
 
     loadSettings();
     loadLogo();
