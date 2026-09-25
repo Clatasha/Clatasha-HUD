@@ -19,7 +19,7 @@
 namespace {
 
 constexpr std::uint32_t kSharedMagic = 0x4C474F43; // "COGL"
-constexpr std::uint32_t kSharedVersion = 3;
+constexpr std::uint32_t kSharedVersion = 4;
 
 enum HookBits : LONG {
     HookSwapBuffers = 1 << 0,
@@ -37,6 +37,8 @@ enum DrawStage : LONG {
     DrawStageLiveFpsUploadDone = 22,
     DrawStageLiveObsFpsUploadEntry = 23,
     DrawStageLiveObsFpsUploadDone = 24,
+    DrawStageLiveTimerUploadEntry = 25,
+    DrawStageLiveTimerUploadDone = 26,
     DrawStageViewportReady = 30,
     DrawStageStateCaptured = 40,
     DrawStageOverlayStateApplied = 50,
@@ -60,7 +62,9 @@ struct alignas(8) OpenGlPresentShared {
     volatile LONG64 drawCount;
     volatile LONG64 lastDrawTick;
     volatile LONG renderMode; // 0 = idle, 1 = modern shader, 2 = fallback marker
-    volatile LONG liveFpsInput; // helper writes integer FPS; renderer does not use it
+    volatile LONG liveFpsInput;
+    volatile LONG liveSessionSeconds; // OBS writes elapsed recording/stream seconds
+    volatile LONG liveSessionSecondsAck; // last timer value uploaded by renderer
 };
 
 using SwapBuffersFn = BOOL (WINAPI *)(HDC);
@@ -160,15 +164,27 @@ constexpr int kObsFpsPatchX = 74;
 constexpr int kObsFpsPatchY = 3;
 constexpr int kObsFpsPatchWidth = 29;
 constexpr int kObsFpsPatchHeight = 23;
+constexpr int kTimerPatchX = 23;
+constexpr int kTimerPatchY = 28;
+constexpr int kTimerPatchWidth = 69;
+constexpr int kTimerPatchHeight = 16;
+constexpr int kTimerGlyphWidth = 8;
+constexpr int kTimerGlyphHeight = 16;
+constexpr int kTimerGlyphCount = 11;
 constexpr int kMaxCachedFps = 999;
+constexpr LONG kMaxTimerSeconds = 359999; // 99:59:59
 
 GLuint g_hudTexture = 0;
 HGLRC g_hudTextureContext = nullptr;
 std::vector<std::uint8_t> g_hudPixels;
 std::vector<std::vector<std::uint8_t>> g_liveFpsPatches;
 std::vector<std::vector<std::uint8_t>> g_liveObsFpsPatches;
+std::vector<std::vector<std::uint8_t>> g_timerGlyphs;
+std::vector<std::uint8_t> g_timerBasePatch;
+std::vector<std::uint8_t> g_timerScratch;
 LONG g_lastRenderedLiveFps = -1;
 LONG g_lastRenderedLiveObsFps = -1;
+LONG g_lastRenderedSessionSeconds = -1;
 
 bool ShouldDrawOverlay(HDC dc)
 {
@@ -299,10 +315,7 @@ bool BuildStaticHudPixels()
         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     SetTextColor(dc, RGB(205, 209, 212));
-    RECT timerRect{23, 28, 92, 44};
-    DrawTextW(
-        dc, L"0:12:34", -1, &timerRect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    // Leave the timer rectangle clean. Timer glyphs are cached once below.
 
     HBRUSH dotBrush =
         CreateSolidBrush(RGB(158, 164, 169));
@@ -604,6 +617,89 @@ bool BuildStaticHudPixels()
             }
         }
     }
+
+    // Cache tiny timer glyphs (0-9 and colon) while GDI is already active.
+    // Runtime timer updates only compose these cached pixels.
+    SelectObject(fpsDc, tinyFont);
+    SetBkMode(fpsDc, TRANSPARENT);
+    SetTextColor(fpsDc, RGB(205, 209, 212));
+
+    g_timerBasePatch.resize(
+        static_cast<size_t>(kTimerPatchWidth) *
+        static_cast<size_t>(kTimerPatchHeight) * 4);
+    for (int y = 0; y < kTimerPatchHeight; ++y) {
+        for (int x = 0; x < kTimerPatchWidth; ++x) {
+            const size_t srcIndex =
+                (static_cast<size_t>(y + kTimerPatchY) * kHudWidth +
+                 static_cast<size_t>(x + kTimerPatchX)) * 4;
+            const size_t dstIndex =
+                (static_cast<size_t>(y) * kTimerPatchWidth +
+                 static_cast<size_t>(x)) * 4;
+            g_timerBasePatch[dstIndex + 0] = g_hudPixels[srcIndex + 0];
+            g_timerBasePatch[dstIndex + 1] = g_hudPixels[srcIndex + 1];
+            g_timerBasePatch[dstIndex + 2] = g_hudPixels[srcIndex + 2];
+            g_timerBasePatch[dstIndex + 3] = g_hudPixels[srcIndex + 3];
+        }
+    }
+
+    g_timerGlyphs.clear();
+    g_timerGlyphs.resize(kTimerGlyphCount);
+
+    for (int glyphIndex = 0; glyphIndex < kTimerGlyphCount; ++glyphIndex) {
+        ZeroMemory(
+            fpsBits,
+            static_cast<SIZE_T>(kFpsPatchWidth) *
+                static_cast<SIZE_T>(kFpsPatchHeight) * 4);
+
+        wchar_t glyphText[2] = {
+            glyphIndex < 10
+                ? static_cast<wchar_t>(L'0' + glyphIndex)
+                : L':',
+            L'\0'};
+        RECT glyphRect{
+            0, 0,
+            kTimerGlyphWidth,
+            kTimerGlyphHeight};
+        DrawTextW(
+            fpsDc,
+            glyphText,
+            1,
+            &glyphRect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        auto &glyph = g_timerGlyphs[glyphIndex];
+        glyph.resize(
+            static_cast<size_t>(kTimerGlyphWidth) *
+            static_cast<size_t>(kTimerGlyphHeight) * 4);
+
+        for (int y = 0; y < kTimerGlyphHeight; ++y) {
+            for (int x = 0; x < kTimerGlyphWidth; ++x) {
+                const size_t srcIndex =
+                    (static_cast<size_t>(y) * kFpsPatchWidth +
+                     static_cast<size_t>(x)) * 4;
+                const size_t dstIndex =
+                    (static_cast<size_t>(y) * kTimerGlyphWidth +
+                     static_cast<size_t>(x)) * 4;
+                const std::uint8_t b = fpsSource[srcIndex + 0];
+                const std::uint8_t g = fpsSource[srcIndex + 1];
+                const std::uint8_t r = fpsSource[srcIndex + 2];
+                const int coverageSource =
+                    std::max<int>(r, std::max<int>(g, b));
+                const std::uint8_t alpha =
+                    static_cast<std::uint8_t>(
+                        std::min(
+                            255,
+                            coverageSource * 255 / 212));
+
+                glyph[dstIndex + 0] = 205;
+                glyph[dstIndex + 1] = 209;
+                glyph[dstIndex + 2] = 212;
+                glyph[dstIndex + 3] = alpha;
+            }
+        }
+    }
+
+    g_timerScratch = g_timerBasePatch;
 
     SelectObject(fpsDc, fpsOldFont);
     SelectObject(fpsDc, fpsOldBitmap);
@@ -909,6 +1005,8 @@ bool CreateHudTexture()
 
     g_lastRenderedLiveFps = -1;
     g_lastRenderedLiveObsFps = -1;
+    g_lastRenderedSessionSeconds = -1;
+    InterlockedExchange(&g_shared->liveSessionSecondsAck, 0);
     return true;
 }
 
@@ -1028,6 +1126,141 @@ void UpdateLiveObsFpsTexture()
 
     g_lastRenderedLiveObsFps = clampedObsFps;
     SetDrawStage(DrawStageLiveObsFpsUploadDone);
+}
+
+void UpdateLiveSessionTimerTexture()
+{
+    if (!g_shared ||
+        !g_hudTexture ||
+        g_timerGlyphs.size() != kTimerGlyphCount ||
+        g_timerBasePatch.empty()) {
+        return;
+    }
+
+    const LONG receivedSeconds =
+        InterlockedCompareExchange(
+            &g_shared->liveSessionSeconds,
+            0,
+            0);
+    const LONG clampedSeconds =
+        std::clamp<LONG>(
+            receivedSeconds,
+            0,
+            kMaxTimerSeconds);
+    if (clampedSeconds == g_lastRenderedSessionSeconds)
+        return;
+
+    const LONG hours = clampedSeconds / 3600;
+    const LONG minutes = (clampedSeconds % 3600) / 60;
+    const LONG seconds = clampedSeconds % 60;
+
+    wchar_t timerText[16] = {};
+    swprintf_s(
+        timerText,
+        L"%ld:%02ld:%02ld",
+        hours,
+        minutes,
+        seconds);
+
+    g_timerScratch = g_timerBasePatch;
+
+    const size_t textLength = std::wcslen(timerText);
+    const int textWidth =
+        static_cast<int>(textLength) * kTimerGlyphWidth;
+    const int startX =
+        std::max(0, (kTimerPatchWidth - textWidth) / 2);
+
+    for (size_t charIndex = 0;
+         charIndex < textLength;
+         ++charIndex) {
+        const wchar_t ch = timerText[charIndex];
+        int glyphIndex = -1;
+        if (ch >= L'0' && ch <= L'9')
+            glyphIndex = static_cast<int>(ch - L'0');
+        else if (ch == L':')
+            glyphIndex = 10;
+
+        if (glyphIndex < 0 ||
+            glyphIndex >= static_cast<int>(g_timerGlyphs.size())) {
+            continue;
+        }
+
+        const auto &glyph =
+            g_timerGlyphs[static_cast<size_t>(glyphIndex)];
+        const int dstX =
+            startX +
+            static_cast<int>(charIndex) * kTimerGlyphWidth;
+
+        for (int y = 0; y < kTimerGlyphHeight; ++y) {
+            for (int x = 0; x < kTimerGlyphWidth; ++x) {
+                const int px = dstX + x;
+                if (px < 0 || px >= kTimerPatchWidth)
+                    continue;
+
+                const size_t glyphIndexPx =
+                    (static_cast<size_t>(y) * kTimerGlyphWidth +
+                     static_cast<size_t>(x)) * 4;
+                const std::uint8_t alpha =
+                    glyph[glyphIndexPx + 3];
+                if (alpha == 0)
+                    continue;
+
+                const size_t dstIndex =
+                    (static_cast<size_t>(y) * kTimerPatchWidth +
+                     static_cast<size_t>(px)) * 4;
+                const int inverseAlpha = 255 - alpha;
+
+                for (int channel = 0; channel < 3; ++channel) {
+                    g_timerScratch[dstIndex + channel] =
+                        static_cast<std::uint8_t>(
+                            (static_cast<int>(
+                                 glyph[glyphIndexPx + channel]) *
+                                 alpha +
+                             static_cast<int>(
+                                 g_timerScratch[dstIndex + channel]) *
+                                 inverseAlpha) /
+                            255);
+                }
+                g_timerScratch[dstIndex + 3] =
+                    std::max(
+                        g_timerScratch[dstIndex + 3],
+                        alpha);
+            }
+        }
+    }
+
+    SetDrawStage(DrawStageLiveTimerUploadEntry);
+
+    GLint oldTexture = 0;
+    GLint oldUnpackAlignment = 4;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &oldUnpackAlignment);
+
+    glBindTexture(GL_TEXTURE_2D, g_hudTexture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(
+        GL_TEXTURE_2D,
+        0,
+        kTimerPatchX,
+        kTimerPatchY,
+        kTimerPatchWidth,
+        kTimerPatchHeight,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        g_timerScratch.data());
+
+    glPixelStorei(
+        GL_UNPACK_ALIGNMENT,
+        oldUnpackAlignment);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        static_cast<GLuint>(oldTexture));
+
+    g_lastRenderedSessionSeconds = clampedSeconds;
+    InterlockedExchange(
+        &g_shared->liveSessionSecondsAck,
+        clampedSeconds);
+    SetDrawStage(DrawStageLiveTimerUploadDone);
 }
 
 bool EnsureModernHudRenderer()
@@ -1175,6 +1408,7 @@ void DrawStaticHud(HDC dc)
     InterlockedExchange(&g_shared->renderMode, 1);
     UpdateLiveFpsTexture();
     UpdateLiveObsFpsTexture();
+    UpdateLiveSessionTimerTexture();
 
     GLint viewport[4] = {};
     glGetIntegerv(GL_VIEWPORT, viewport);
