@@ -398,6 +398,166 @@ bool DrawEmbeddedLogo(HDC dc)
     return drawn;
 }
 
+void AddRoundedRectPath(
+    Gdiplus::GraphicsPath &path,
+    const Gdiplus::RectF &rect,
+    Gdiplus::REAL radius)
+{
+    const Gdiplus::REAL diameter =
+        std::max<Gdiplus::REAL>(
+            0.0f,
+            std::min<Gdiplus::REAL>(
+                radius * 2.0f,
+                std::min(rect.Width, rect.Height)));
+
+    if (diameter <= 0.0f) {
+        path.AddRectangle(rect);
+        return;
+    }
+
+    const Gdiplus::REAL right =
+        rect.X + rect.Width;
+    const Gdiplus::REAL bottom =
+        rect.Y + rect.Height;
+
+    path.StartFigure();
+    path.AddArc(
+        rect.X,
+        rect.Y,
+        diameter,
+        diameter,
+        180.0f,
+        90.0f);
+    path.AddArc(
+        right - diameter,
+        rect.Y,
+        diameter,
+        diameter,
+        270.0f,
+        90.0f);
+    path.AddArc(
+        right - diameter,
+        bottom - diameter,
+        diameter,
+        diameter,
+        0.0f,
+        90.0f);
+    path.AddArc(
+        rect.X,
+        bottom - diameter,
+        diameter,
+        diameter,
+        90.0f,
+        90.0f);
+    path.CloseFigure();
+}
+
+bool DrawAudioSourceIcons(HDC dc)
+{
+    if (!dc)
+        return false;
+
+    Gdiplus::GdiplusStartupInput startupInput;
+    ULONG_PTR token = 0;
+    if (Gdiplus::GdiplusStartup(
+            &token,
+            &startupInput,
+            nullptr) != Gdiplus::Ok) {
+        return false;
+    }
+
+    bool drawn = false;
+    {
+        Gdiplus::Graphics graphics(dc);
+        graphics.SetSmoothingMode(
+            Gdiplus::SmoothingModeAntiAlias);
+        graphics.SetPixelOffsetMode(
+            Gdiplus::PixelOffsetModeHighQuality);
+        graphics.SetCompositingQuality(
+            Gdiplus::CompositingQualityHighQuality);
+
+        Gdiplus::Pen pen(
+            Gdiplus::Color(
+                255,
+                174,
+                181,
+                187),
+            0.85f);
+        pen.SetStartCap(
+            Gdiplus::LineCapRound);
+        pen.SetEndCap(
+            Gdiplus::LineCapRound);
+        pen.SetLineJoin(
+            Gdiplus::LineJoinRound);
+
+        // Exact geometry from ClatashaHudWindow::paintEvent().
+        Gdiplus::GraphicsPath monitor;
+        AddRoundedRectPath(
+            monitor,
+            Gdiplus::RectF(
+                2.5f,
+                37.5f,
+                7.0f,
+                5.0f),
+            0.8f);
+        graphics.DrawPath(
+            &pen,
+            &monitor);
+        graphics.DrawLine(
+            &pen,
+            6.0f,
+            42.5f,
+            6.0f,
+            44.5f);
+        graphics.DrawLine(
+            &pen,
+            4.0f,
+            44.5f,
+            8.0f,
+            44.5f);
+
+        Gdiplus::GraphicsPath mic;
+        AddRoundedRectPath(
+            mic,
+            Gdiplus::RectF(
+                15.2f,
+                37.2f,
+                3.6f,
+                5.8f),
+            1.8f);
+        graphics.DrawPath(
+            &pen,
+            &mic);
+
+        // Qt's +180 degree span renders the lower pickup arc here.
+        graphics.DrawArc(
+            &pen,
+            14.3f,
+            39.6f,
+            5.4f,
+            4.8f,
+            0.0f,
+            180.0f);
+        graphics.DrawLine(
+            &pen,
+            17.0f,
+            44.3f,
+            17.0f,
+            46.0f);
+        graphics.DrawLine(
+            &pen,
+            15.3f,
+            46.0f,
+            18.7f,
+            46.0f);
+
+        drawn = true;
+    }
+
+    Gdiplus::GdiplusShutdown(token);
+    return drawn;
+}
+
 bool BuildStaticHudPixels()
 {
     if (!g_hudPixels.empty())
@@ -502,20 +662,31 @@ bool BuildStaticHudPixels()
 
     SetTextColor(dc, RGB(165, 171, 176));
 
-    HPEN iconPen =
-        CreatePen(PS_SOLID, 1, RGB(174, 181, 187));
-    SelectObject(dc, iconPen);
-    SelectObject(dc, GetStockObject(NULL_BRUSH));
-    Rectangle(dc, 3, 38, 10, 43);
-    MoveToEx(dc, 6, 43, nullptr);
-    LineTo(dc, 6, 46);
-    MoveToEx(dc, 4, 46, nullptr);
-    LineTo(dc, 9, 46);
+    HPEN iconPen = nullptr;
+    if (!DrawAudioSourceIcons(dc)) {
+        // Conservative fallback if GDI+ initialization fails.
+        iconPen =
+            CreatePen(
+                PS_SOLID,
+                1,
+                RGB(174, 181, 187));
+        SelectObject(dc, iconPen);
+        SelectObject(
+            dc,
+            GetStockObject(NULL_BRUSH));
+        Rectangle(dc, 3, 38, 10, 43);
+        MoveToEx(dc, 6, 43, nullptr);
+        LineTo(dc, 6, 46);
+        MoveToEx(dc, 4, 46, nullptr);
+        LineTo(dc, 9, 46);
 
-    RoundRect(dc, 15, 37, 19, 43, 3, 3);
-    Arc(dc, 14, 39, 20, 45, 14, 41, 20, 41);
-    MoveToEx(dc, 17, 44, nullptr);
-    LineTo(dc, 17, 47);
+        RoundRect(dc, 15, 37, 19, 43, 3, 3);
+        Arc(dc, 14, 39, 20, 45, 14, 41, 20, 41);
+        MoveToEx(dc, 17, 44, nullptr);
+        LineTo(dc, 17, 47);
+        MoveToEx(dc, 15, 46, nullptr);
+        LineTo(dc, 19, 46);
+    }
 
     HBRUSH logoBrush = nullptr;
     if (!DrawEmbeddedLogo(dc)) {
@@ -577,7 +748,8 @@ bool BuildStaticHudPixels()
         SelectObject(dc, oldPen);
         SelectObject(dc, oldBrush);
         SelectObject(dc, oldBitmap);
-        DeleteObject(iconPen);
+        if (iconPen)
+            DeleteObject(iconPen);
         DeleteObject(dotBrush);
         DeleteObject(logoBrush);
         DeleteObject(badgePen);
@@ -616,7 +788,8 @@ bool BuildStaticHudPixels()
         SelectObject(dc, oldPen);
         SelectObject(dc, oldBrush);
         SelectObject(dc, oldBitmap);
-        DeleteObject(iconPen);
+        if (iconPen)
+            DeleteObject(iconPen);
         DeleteObject(dotBrush);
         DeleteObject(logoBrush);
         DeleteObject(badgePen);
@@ -1013,7 +1186,8 @@ bool BuildStaticHudPixels()
     SelectObject(dc, oldBrush);
     SelectObject(dc, oldBitmap);
 
-    DeleteObject(iconPen);
+    if (iconPen)
+        DeleteObject(iconPen);
     DeleteObject(dotBrush);
     if (logoBrush)
         DeleteObject(logoBrush);
