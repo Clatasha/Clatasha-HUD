@@ -239,6 +239,8 @@ constexpr std::uint32_t kHudStatusRecordingBit = 1u << 20;
 constexpr std::uint32_t kHudStatusStreamingBit = 1u << 21;
 constexpr std::uint32_t kHudStatusReplayBit = 1u << 22;
 constexpr std::uint32_t kHudStatusOpacityShift = 23;
+constexpr std::uint32_t kHudStatusLocationShift = 30;
+constexpr std::uint32_t kHudStatusLocationMask = 0x3u;
 constexpr int kMaxCachedFps = 999;
 constexpr LONG kMaxTimerSeconds = 359999; // 99:59:59
 
@@ -2994,16 +2996,51 @@ void DrawStaticHud(HDC dc)
     }
     SetDrawStage(DrawStageViewportReady);
 
+    const std::uint32_t packedPlacementStatus =
+        g_shared
+            ? static_cast<std::uint32_t>(
+                  InterlockedCompareExchange(
+                      &g_shared->liveHudStatus,
+                      0,
+                      0))
+            : 0u;
+    const std::uint32_t locationCode =
+        (packedPlacementStatus >>
+         kHudStatusLocationShift) &
+        kHudStatusLocationMask;
+
+    const bool anchorRight =
+        locationCode == 1u ||
+        locationCode == 3u;
+    const bool anchorBottom =
+        locationCode == 2u ||
+        locationCode == 3u;
+
     const GLfloat leftPx =
-        static_cast<GLfloat>(
-            drawWidth - kHudWidth - kHudMargin);
+        anchorRight
+            ? static_cast<GLfloat>(
+                  drawWidth -
+                  kHudWidth -
+                  kHudMargin)
+            : static_cast<GLfloat>(
+                  kHudMargin);
     const GLfloat rightPx =
-        leftPx + static_cast<GLfloat>(kHudWidth);
-    const GLfloat topPx =
+        leftPx +
         static_cast<GLfloat>(
-            drawHeight - kHudMargin);
+            kHudWidth);
+
     const GLfloat bottomPx =
-        topPx - static_cast<GLfloat>(kHudHeight);
+        anchorBottom
+            ? static_cast<GLfloat>(
+                  kHudMargin)
+            : static_cast<GLfloat>(
+                  drawHeight -
+                  kHudMargin -
+                  kHudHeight);
+    const GLfloat topPx =
+        bottomPx +
+        static_cast<GLfloat>(
+            kHudHeight);
 
     const auto ndcX = [drawWidth](GLfloat px) {
         return px * 2.0f /
