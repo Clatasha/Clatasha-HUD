@@ -37,7 +37,12 @@
 namespace {
 constexpr int kHudWidth = 145;
 constexpr int kHudHeight = 50;
+constexpr int kRecordingWarningHeight = 28;
+constexpr int kHudSurfaceHeight =
+    kHudHeight + kRecordingWarningHeight;
 constexpr int kScreenMargin = 12;
+constexpr qint64 kRecordingWarningDurationMs = 3000;
+constexpr qint64 kRecordingWarningSlideMs = 300;
 constexpr qint64 kFpsHoldMs = 2000;
 constexpr double kFpsSmoothingAlpha = 0.45;
 
@@ -69,9 +74,10 @@ struct alignas(8) OpenGlPresentSharedTransport {
 };
 
 constexpr std::uint32_t kHudFrameMagic = 0x52464843; // CHFR
-constexpr std::uint32_t kHudFrameVersion = 2;
+constexpr std::uint32_t kHudFrameVersion = 3;
 constexpr int kHudFrameStride = kHudWidth * 4;
-constexpr int kHudFrameBytes = kHudFrameStride * kHudHeight;
+constexpr int kHudFrameBytes =
+    kHudFrameStride * kHudSurfaceHeight;
 
 struct alignas(8) HudFrameShared {
     std::uint32_t magic;
@@ -261,14 +267,14 @@ void PublishHudFrame(quint32 pid, QWidget *widget)
         shared->version == kHudFrameVersion &&
         shared->pid == pid &&
         shared->width == kHudWidth &&
-        shared->height == kHudHeight &&
+        shared->height == kHudSurfaceHeight &&
         shared->stride == kHudFrameStride) {
         // Match Qt/Windows translucent-window composition explicitly:
         // publish premultiplied RGBA so injected renderers can use
         // ONE, INV_SRC_ALPHA without reinterpreting semi-transparent pixels.
         QImage frame(
             kHudWidth,
-            kHudHeight,
+            kHudSurfaceHeight,
             QImage::Format_RGBA8888_Premultiplied);
         frame.fill(Qt::transparent);
 
@@ -294,7 +300,9 @@ void PublishHudFrame(quint32 pid, QWidget *widget)
             1;
         const LONG next = current ^ 1;
 
-        for (int y = 0; y < kHudHeight; ++y) {
+        for (int y = 0;
+             y < kHudSurfaceHeight;
+             ++y) {
             std::memcpy(
                 shared->pixels[next] +
                     static_cast<size_t>(y) *
@@ -387,7 +395,9 @@ void drawSegmentedMeter(QPainter &p, int x, int y, int w, int h, float level)
 ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
 {
     setWindowTitle(QStringLiteral("Clatasha HUD"));
-    setFixedSize(kHudWidth, kHudHeight);
+    setFixedSize(
+        kHudWidth,
+        kHudSurfaceHeight);
     setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
                    Qt::WindowDoesNotAcceptFocus);
     setAttribute(Qt::WA_TranslucentBackground, true);
@@ -422,6 +432,7 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
     setWindowOpacity(1.0);
 
     gameFpsClock_.start();
+    recordingWarningClock_.start();
     startFpsHelper();
 
     desktopMeter_ = obs_volmeter_create(OBS_FADER_LOG);
@@ -491,6 +502,11 @@ void ClatashaHudWindow::loadSettings()
     QSettings settings(path, QSettings::IniFormat);
     opacityPercent_ = qBound(10, settings.value(QStringLiteral("hud/opacity"), 50).toInt(), 100);
     location_ = settings.value(QStringLiteral("hud/location"), QStringLiteral("top-right")).toString();
+    recordingVisibilityWarningsEnabled_ =
+        settings.value(
+                    QStringLiteral("hud/recordingVisibilityWarnings"),
+                    true)
+            .toBool();
 }
 
 void ClatashaHudWindow::saveSettings() const
@@ -503,6 +519,9 @@ void ClatashaHudWindow::saveSettings() const
     QSettings settings(path, QSettings::IniFormat);
     settings.setValue(QStringLiteral("hud/opacity"), opacityPercent_);
     settings.setValue(QStringLiteral("hud/location"), location_);
+    settings.setValue(
+        QStringLiteral("hud/recordingVisibilityWarnings"),
+        recordingVisibilityWarningsEnabled_);
     settings.sync();
 }
 
@@ -628,6 +647,11 @@ void ClatashaHudWindow::updateForegroundGame()
     const quint32 newPid = static_cast<quint32>(pid);
     if (trackedGamePid_ == newPid)
         return;
+
+    if (hudRenderPathKnown_ &&
+        fullscreenHudActive_) {
+        updateHudRenderPathWarning(false);
+    }
 
     trackedGamePid_ = newPid;
     resetGameFps();
@@ -1004,6 +1028,14 @@ void ClatashaHudWindow::readFpsState()
     openGlLiveStatusSent_ = openGlLiveStatusSent;
     openGlLiveStatusAck_ = openGlLiveStatusAck;
 
+    const bool injectedHudActive =
+        gameFullscreen_ &&
+        openGlDrawArmed_ &&
+        openGlRenderMode_ != 0 &&
+        openGlDrawCount_ > 0;
+    updateHudRenderPathWarning(
+        injectedHudActive);
+
     if (firstLiveFpsAck) {
         blog(LOG_INFO,
              "[Clatasha HUD] OpenGL live FPS transport PID %u acknowledged: tx=%d rx=%d",
@@ -1041,6 +1073,114 @@ void ClatashaHudWindow::setOpacityPercent(int value)
 {
     opacityPercent_ = qBound(10, value, 100);
     update();
+}
+
+void ClatashaHudWindow::setRecordingVisibilityWarningsEnabled(
+    bool enabled)
+{
+    recordingVisibilityWarningsEnabled_ =
+        enabled;
+
+    if (!recordingVisibilityWarningsEnabled_)
+        recordingWarningStartMs_ = -1;
+
+    update();
+}
+
+void ClatashaHudWindow::showRecordingVisibilityWarning(
+    bool recorded)
+{
+    if (!recordingVisibilityWarningsEnabled_)
+        return;
+
+    recordingWarningRecorded_ = recorded;
+    recordingWarningStartMs_ =
+        recordingWarningClock_.elapsed();
+
+    blog(
+        LOG_INFO,
+        "[Clatasha HUD] Recording visibility warning: %s",
+        recorded
+            ? "shows up in recordings"
+            : "does not show up in recordings");
+
+    update();
+}
+
+void ClatashaHudWindow::updateHudRenderPathWarning(
+    bool fullscreenHudActive)
+{
+    if (!hudRenderPathKnown_) {
+        hudRenderPathKnown_ = true;
+        fullscreenHudActive_ =
+            fullscreenHudActive;
+        return;
+    }
+
+    if (fullscreenHudActive ==
+        fullscreenHudActive_) {
+        return;
+    }
+
+    fullscreenHudActive_ =
+        fullscreenHudActive;
+    showRecordingVisibilityWarning(
+        fullscreenHudActive_);
+}
+
+int ClatashaHudWindow::recordingVisibilityWarningHeight() const
+{
+    if (!recordingVisibilityWarningsEnabled_ ||
+        recordingWarningStartMs_ < 0) {
+        return 0;
+    }
+
+    const qint64 elapsed =
+        recordingWarningClock_.elapsed() -
+        recordingWarningStartMs_;
+    if (elapsed < 0 ||
+        elapsed >=
+            kRecordingWarningDurationMs) {
+        return 0;
+    }
+
+    if (elapsed <
+        kRecordingWarningSlideMs) {
+        return qBound(
+            0,
+            static_cast<int>(
+                std::lround(
+                    static_cast<double>(
+                        kRecordingWarningHeight) *
+                    static_cast<double>(
+                        elapsed) /
+                    static_cast<double>(
+                        kRecordingWarningSlideMs))),
+            kRecordingWarningHeight);
+    }
+
+    const qint64 slideOutStart =
+        kRecordingWarningDurationMs -
+        kRecordingWarningSlideMs;
+    if (elapsed >
+        slideOutStart) {
+        const qint64 remaining =
+            kRecordingWarningDurationMs -
+            elapsed;
+        return qBound(
+            0,
+            static_cast<int>(
+                std::lround(
+                    static_cast<double>(
+                        kRecordingWarningHeight) *
+                    static_cast<double>(
+                        remaining) /
+                    static_cast<double>(
+                        kRecordingWarningSlideMs))),
+            kRecordingWarningHeight);
+    }
+
+    return kRecordingWarningHeight;
 }
 
 void ClatashaHudWindow::setLocation(const QString &location)
@@ -1099,13 +1239,41 @@ void ClatashaHudWindow::positionHud()
         return;
 
     const QRect area = screen->availableGeometry();
-    int x = area.left() + kScreenMargin;
-    int y = area.top() + kScreenMargin;
+    const bool bottom =
+        location_.startsWith(
+            QStringLiteral("bottom"));
+    const int baseOffsetY =
+        bottom
+            ? kRecordingWarningHeight
+            : 0;
 
-    if (location_.endsWith(QStringLiteral("right")))
-        x = area.right() - width() - kScreenMargin + 1;
-    if (location_.startsWith(QStringLiteral("bottom")))
-        y = area.bottom() - height() - kScreenMargin + 1;
+    int x =
+        area.left() +
+        kScreenMargin;
+    int y =
+        area.top() +
+        kScreenMargin -
+        baseOffsetY;
+
+    if (location_.endsWith(
+            QStringLiteral("right"))) {
+        x =
+            area.right() -
+            kHudWidth -
+            kScreenMargin +
+            1;
+    }
+
+    if (bottom) {
+        const int baseTop =
+            area.bottom() -
+            kHudHeight -
+            kScreenMargin +
+            1;
+        y =
+            baseTop -
+            baseOffsetY;
+    }
 
     move(x, y);
 }
@@ -1419,8 +1587,26 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
     p.setRenderHint(QPainter::Antialiasing, true);
     p.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
+    const bool warningAbove =
+        location_.startsWith(
+            QStringLiteral("bottom"));
+    const int baseY =
+        warningAbove
+            ? kRecordingWarningHeight
+            : 0;
+
+    p.save();
+    p.translate(0, baseY);
+
     QPainterPath panel;
-    panel.addRoundedRect(QRectF(0.5, 0.5, width() - 1.0, height() - 1.0), 4.0, 4.0);
+    panel.addRoundedRect(
+        QRectF(
+            0.5,
+            0.5,
+            kHudWidth - 1.0,
+            kHudHeight - 1.0),
+        4.0,
+        4.0);
     const int panelAlpha = qBound(0, qRound(238.0 * opacityPercent_ / 100.0), 255);
     const int borderAlpha = qBound(0, qRound(105.0 * opacityPercent_ / 100.0), 255);
     p.fillPath(panel, QColor(8, 10, 12, panelAlpha));
@@ -1541,6 +1727,85 @@ void ClatashaHudWindow::paintEvent(QPaintEvent *)
         p.save();
         p.setOpacity(opacityPercent_ / 100.0);
         p.drawPixmap(logoRect, logo_, logo_.rect());
+        p.restore();
+    }
+
+    p.restore();
+
+    const int warningHeight =
+        recordingVisibilityWarningHeight();
+    if (warningHeight > 0) {
+        const int warningY =
+            warningAbove
+                ? baseY - warningHeight
+                : baseY + kHudHeight;
+
+        const QRectF warningRect(
+            0.5,
+            static_cast<qreal>(warningY),
+            kHudWidth - 1.0,
+            static_cast<qreal>(
+                warningHeight));
+
+        p.save();
+        p.setOpacity(1.0);
+        p.setRenderHint(
+            QPainter::Antialiasing,
+            true);
+
+        QPainterPath warningPanel;
+        warningPanel.addRoundedRect(
+            warningRect,
+            3.5,
+            3.5);
+
+        const QColor warningColor =
+            recordingWarningRecorded_
+                ? QColor(204, 35, 52, 252)
+                : QColor(24, 166, 87, 252);
+        p.fillPath(
+            warningPanel,
+            warningColor);
+        p.setPen(
+            QPen(
+                QColor(255, 255, 255, 185),
+                0.8));
+        p.drawPath(
+            warningPanel);
+
+        if (warningHeight >= 18) {
+            const QString warningText =
+                recordingWarningRecorded_
+                    ? QStringLiteral(
+                          "SHOWS UP\nIN RECORDINGS")
+                    : QStringLiteral(
+                          "DOES NOT SHOW UP\nIN RECORDINGS");
+
+            p.setPen(
+                QColor(
+                    255,
+                    255,
+                    255,
+                    255));
+            QFont warningFont(
+                QStringLiteral("Segoe UI"),
+                7,
+                QFont::Bold);
+            warningFont.setLetterSpacing(
+                QFont::AbsoluteSpacing,
+                0.15);
+            p.setFont(
+                warningFont);
+            p.drawText(
+                warningRect.adjusted(
+                    4.0,
+                    1.0,
+                    -4.0,
+                    -1.0),
+                Qt::AlignCenter,
+                warningText);
+        }
+
         p.restore();
     }
 }
