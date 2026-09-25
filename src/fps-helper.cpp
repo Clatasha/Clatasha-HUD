@@ -870,12 +870,18 @@ int wmain(int argc, wchar_t **argv)
     const std::wstring sessionName =
         L"ClatashaHUD_DXGI_" + std::to_wstring(parentPid);
 
-    if (!StartEtw(sessionName))
-        return 3;
+    const bool etwStarted =
+        StartEtw(sessionName);
 
-    std::thread traceThread([]() {
-        ProcessTrace(&gTrace, 1, nullptr, nullptr);
-    });
+    // OpenGL fullscreen injection and FPS sampling use the injected present
+    // hook and do not depend on ETW. If ETW is temporarily unavailable,
+    // keep the helper alive so OpenGL HUD support remains functional.
+    std::thread traceThread;
+    if (etwStarted) {
+        traceThread = std::thread([]() {
+            ProcessTrace(&gTrace, 1, nullptr, nullptr);
+        });
+    }
 
     HANDLE parent = nullptr;
     if (parentPid != 0)
@@ -890,15 +896,18 @@ int wmain(int argc, wchar_t **argv)
     }
 
     gStopping.store(true);
-    StopSession(sessionName);
 
-    if (gTrace != INVALID_PROCESSTRACE_HANDLE) {
-        CloseTrace(gTrace);
-        gTrace = INVALID_PROCESSTRACE_HANDLE;
+    if (etwStarted) {
+        StopSession(sessionName);
+
+        if (gTrace != INVALID_PROCESSTRACE_HANDLE) {
+            CloseTrace(gTrace);
+            gTrace = INVALID_PROCESSTRACE_HANDLE;
+        }
+
+        if (traceThread.joinable())
+            traceThread.join();
     }
-
-    if (traceThread.joinable())
-        traceThread.join();
 
     if (parent)
         CloseHandle(parent);
