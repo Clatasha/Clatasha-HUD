@@ -94,7 +94,8 @@ void PublishOpenGlLiveState(quint32 pid,
                             bool recordingActive,
                             bool streamingActive,
                             bool replayActive,
-                            int opacityPercent)
+                            int opacityPercent,
+                            int locationCode)
 {
     if (pid == 0 || !std::isfinite(obsFps) || obsFps <= 0.0)
         return;
@@ -192,6 +193,7 @@ void PublishOpenGlLiveState(quint32 pid,
         constexpr std::uint32_t kStreamingBit = 1u << 21;
         constexpr std::uint32_t kReplayBit = 1u << 22;
         constexpr std::uint32_t kOpacityShift = 23;
+        constexpr std::uint32_t kLocationShift = 30;
 
         const std::uint32_t diskValue =
             static_cast<std::uint32_t>(
@@ -203,9 +205,14 @@ void PublishOpenGlLiveState(quint32 pid,
             static_cast<std::uint32_t>(
                 std::clamp(opacityPercent, 0, 100));
 
+        const std::uint32_t locationValue =
+            static_cast<std::uint32_t>(
+                std::clamp(locationCode, 0, 3));
+
         std::uint32_t packedStatus =
             diskValue |
-            (opacityValue << kOpacityShift);
+            (opacityValue << kOpacityShift) |
+            (locationValue << kLocationShift);
         if (recordingActive)
             packedStatus |= kRecordingBit;
         if (streamingActive)
@@ -658,6 +665,7 @@ void ClatashaHudWindow::updateForegroundGame()
     }
 
     trackedGameExecutable_ = processName;
+    positionHud();
 
     if (processName.isEmpty()) {
         blog(LOG_INFO, "[Clatasha HUD] FPS target PID %u", newPid);
@@ -1051,6 +1059,42 @@ void ClatashaHudWindow::setLocation(const QString &location)
 void ClatashaHudWindow::positionHud()
 {
     QScreen *screen = QGuiApplication::primaryScreen();
+
+#ifdef Q_OS_WIN
+    // When the tracked game is foreground, place the normal HUD on the same
+    // monitor. This keeps desktop/borderless placement consistent with the
+    // injected fullscreen renderer, whose backbuffer already belongs to that
+    // game's monitor.
+    const HWND foreground = GetForegroundWindow();
+    if (foreground && trackedGamePid_ != 0) {
+        DWORD foregroundPid = 0;
+        GetWindowThreadProcessId(
+            foreground,
+            &foregroundPid);
+
+        if (foregroundPid ==
+            trackedGamePid_) {
+            RECT windowRect{};
+            if (GetWindowRect(
+                    foreground,
+                    &windowRect)) {
+                const QPoint center(
+                    (windowRect.left +
+                     windowRect.right) /
+                        2,
+                    (windowRect.top +
+                     windowRect.bottom) /
+                        2);
+                if (QScreen *gameScreen =
+                        QGuiApplication::screenAt(
+                            center)) {
+                    screen = gameScreen;
+                }
+            }
+        }
+    }
+#endif
+
     if (!screen)
         return;
 
@@ -1246,7 +1290,14 @@ void ClatashaHudWindow::refresh()
         recordingActive_,
         streamingActive_,
         replayBufferActive_,
-        opacityPercent_);
+        opacityPercent_,
+        location_ == QStringLiteral("top-left")
+            ? 0
+            : location_ == QStringLiteral("top-right")
+                  ? 1
+                  : location_ == QStringLiteral("bottom-left")
+                        ? 2
+                        : 3);
     PublishHudFrame(
         trackedGamePid_,
         this);
