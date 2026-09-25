@@ -91,6 +91,7 @@ static bool g_browserHudOverlaysWantedVisible = true;
 #ifdef Q_OS_WIN
 static HANDLE g_displayCaptureSafeEvent = nullptr;
 static bool g_displayCaptureSafeActive = false;
+static bool g_displayCaptureSafeModeEnabled = false;
 #endif
 
 namespace {
@@ -1357,6 +1358,64 @@ QString externalWindowDescription(HWND hwnd)
     return QStringLiteral("%1 — %2").arg(processName, windowTitle);
 }
 
+bool isSafeAutomaticGameTarget(HWND hwnd)
+{
+    if (!isExternalForegroundCandidate(hwnd))
+        return false;
+
+    hwnd = GetAncestor(hwnd, GA_ROOT);
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0)
+        return false;
+
+    HANDLE process =
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            pid);
+    if (!process)
+        return false;
+
+    wchar_t path[MAX_PATH] = {};
+    DWORD size = MAX_PATH;
+    std::wstring processName;
+    if (QueryFullProcessImageNameW(
+            process,
+            0,
+            path,
+            &size)) {
+        processName.assign(path, size);
+        const size_t separator =
+            processName.find_last_of(L"\\/");
+        if (separator != std::wstring::npos)
+            processName.erase(0, separator + 1);
+    }
+    CloseHandle(process);
+
+    static const wchar_t *excluded[] = {
+        L"explorer.exe",
+        L"SearchHost.exe",
+        L"StartMenuExperienceHost.exe",
+        L"ShellExperienceHost.exe",
+        L"TextInputHost.exe",
+        L"LockApp.exe",
+        L"dwm.exe",
+        L"obs64.exe",
+    };
+
+    for (const wchar_t *candidate : excluded) {
+        if (_wcsicmp(
+                processName.c_str(),
+                candidate) == 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void loadGameWindowSettings()
 {
     const QString path = settingsFilePath();
@@ -1368,6 +1427,11 @@ void loadGameWindowSettings()
         settings.value(
                     QStringLiteral("gameWindow/keepBorderlessApplied"),
                     true)
+            .toBool();
+    g_displayCaptureSafeModeEnabled =
+        settings.value(
+                    QStringLiteral("gameWindow/displayCaptureSafeMode"),
+                    false)
             .toBool();
 }
 
@@ -1381,6 +1445,9 @@ void saveGameWindowSettings()
     settings.setValue(
         QStringLiteral("gameWindow/keepBorderlessApplied"),
         g_keepGameBorderlessApplied);
+    settings.setValue(
+        QStringLiteral("gameWindow/displayCaptureSafeMode"),
+        g_displayCaptureSafeModeEnabled);
     settings.sync();
 }
 
@@ -2679,6 +2746,24 @@ bool activeDisplayCapturePresent()
 
 void updateDisplayCaptureSafeMode()
 {
+    if (!g_displayCaptureSafeModeEnabled) {
+        if (g_displayCaptureSafeEvent)
+            ResetEvent(g_displayCaptureSafeEvent);
+
+        if (g_displayCaptureForcedBorderless) {
+            restoreGameBorderlessWindow();
+            g_displayCaptureForcedBorderless = false;
+        }
+
+        if (g_displayCaptureSafeActive) {
+            g_displayCaptureSafeActive = false;
+            blog(
+                LOG_INFO,
+                "[Clatasha HUD] Display Capture Safe Mode: disabled by user");
+        }
+        return;
+    }
+
     const bool active =
         activeDisplayCapturePresent();
 
@@ -2696,7 +2781,9 @@ void updateDisplayCaptureSafeMode()
     if (active) {
         if (!g_gameBorderless.active &&
             g_lastExternalForegroundWindow &&
-            IsWindow(g_lastExternalForegroundWindow)) {
+            IsWindow(g_lastExternalForegroundWindow) &&
+            isSafeAutomaticGameTarget(
+                g_lastExternalForegroundWindow)) {
             if (forceGameBorderless(
                     g_lastExternalForegroundWindow)) {
                 g_displayCaptureForcedBorderless = true;
@@ -3587,6 +3674,27 @@ static void show_settings()
     keepBorderless->setEnabled(false);
 #endif
 
+    auto *displayCaptureSafeMode = new QCheckBox(
+        QStringLiteral("Display Capture Safe Mode"),
+        gameWindowCard);
+#ifdef Q_OS_WIN
+    displayCaptureSafeMode->setChecked(
+        g_displayCaptureSafeModeEnabled);
+#else
+    displayCaptureSafeMode->setChecked(false);
+    displayCaptureSafeMode->setEnabled(false);
+#endif
+
+    auto *displayCaptureSafeNote = new QLabel(
+        QStringLiteral(
+            "Off by default. When enabled, Clatasha can keep the HUD local-only "
+            "for OBS Display Capture. If needed, it may switch the selected game "
+            "to Clatasha Borderless Fullscreen and temporarily enable Windows "
+            "taskbar Auto-hide. Nothing is changed unless you enable this option."),
+        gameWindowCard);
+    displayCaptureSafeNote->setWordWrap(true);
+    displayCaptureSafeNote->setProperty("muted", true);
+
     auto *gameButtons = new QHBoxLayout();
     auto *forceBorderlessButton = new QPushButton(
         QStringLiteral("Force Borderless Fullscreen"),
@@ -3618,6 +3726,8 @@ static void show_settings()
     gameWindowLayout->addWidget(gameTargetLabel);
     gameWindowLayout->addWidget(gameWindowStatus);
     gameWindowLayout->addWidget(keepBorderless);
+    gameWindowLayout->addWidget(displayCaptureSafeMode);
+    gameWindowLayout->addWidget(displayCaptureSafeNote);
     gameWindowLayout->addLayout(gameButtons);
     gameWindowLayout->addWidget(gameWindowNote);
 
@@ -4100,8 +4210,27 @@ static void show_settings()
         g_hud->saveSettings();
         saveOverlayConfigs(overlayConfigs);
 #ifdef Q_OS_WIN
-        g_keepGameBorderlessApplied = keepBorderless->isChecked();
+        g_keepGameBorderlessApplied =
+            keepBorderless->isChecked();
+
+        const bool safeModeWasEnabled =
+            g_displayCaptureSafeModeEnabled;
+        g_displayCaptureSafeModeEnabled =
+            displayCaptureSafeMode->isChecked();
+
+        if (safeModeWasEnabled &&
+            !g_displayCaptureSafeModeEnabled) {
+            if (g_displayCaptureSafeEvent)
+                ResetEvent(g_displayCaptureSafeEvent);
+            if (g_displayCaptureForcedBorderless) {
+                restoreGameBorderlessWindow();
+                g_displayCaptureForcedBorderless = false;
+            }
+            g_displayCaptureSafeActive = false;
+        }
+
         saveGameWindowSettings();
+        updateDisplayCaptureSafeMode();
 #endif
 
         const bool videoOk = applyVideoOverlays(overlayConfigs);
