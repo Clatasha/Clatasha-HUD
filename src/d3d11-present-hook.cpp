@@ -734,6 +734,23 @@ void DrawHud(
         return;
     }
 
+    // Window geometry alone cannot distinguish borderless/windowed-fullscreen
+    // from a true DXGI fullscreen swap chain. In borderless modes the normal
+    // Qt HUD remains visible, so drawing the injected HUD creates a duplicate.
+    BOOL dxgiFullscreen = FALSE;
+    if (!swapChain ||
+        FAILED(
+            swapChain->GetFullscreenState(
+                &dxgiFullscreen,
+                nullptr)) ||
+        !dxgiFullscreen) {
+        InterlockedExchange(
+            &g_shared->renderMode,
+            0);
+        SetDrawStage(DrawStageIdle);
+        return;
+    }
+
     SetDrawStage(DrawStageEligible);
     SetDrawStage(DrawStageRendererEntry);
 
