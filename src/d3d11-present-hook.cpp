@@ -20,7 +20,7 @@ namespace {
 constexpr std::uint32_t kSharedMagic = 0x4C474F43;
 constexpr std::uint32_t kSharedVersion = 6;
 constexpr std::uint32_t kFrameMagic = 0x52464843; // CHFR
-constexpr std::uint32_t kFrameVersion = 1;
+constexpr std::uint32_t kFrameVersion = 2;
 
 constexpr int kHudWidth = 145;
 constexpr int kHudHeight = 50;
@@ -411,8 +411,9 @@ bool CreatePipeline()
         return false;
 
     D3D11_SAMPLER_DESC samplerDesc{};
+    // HUD texture is rendered at exact native size; avoid softening.
     samplerDesc.Filter =
-        D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        D3D11_FILTER_MIN_MAG_MIP_POINT;
     samplerDesc.AddressU =
         D3D11_TEXTURE_ADDRESS_CLAMP;
     samplerDesc.AddressV =
@@ -430,8 +431,9 @@ bool CreatePipeline()
 
     D3D11_BLEND_DESC blendDesc{};
     blendDesc.RenderTarget[0].BlendEnable = TRUE;
+    // Shared Qt frame is RGBA premultiplied.
     blendDesc.RenderTarget[0].SrcBlend =
-        D3D11_BLEND_SRC_ALPHA;
+        D3D11_BLEND_ONE;
     blendDesc.RenderTarget[0].DestBlend =
         D3D11_BLEND_INV_SRC_ALPHA;
     blendDesc.RenderTarget[0].BlendOp =
