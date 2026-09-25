@@ -471,12 +471,45 @@ void MaybeInjectOpenGlHook(
             : (attempts >= 3 ? "failed" : "retrying");
 }
 
+bool IsD3D11InjectionExcludedProcess(DWORD pid)
+{
+    const std::wstring name =
+        ProcessBaseName(pid);
+
+    static const wchar_t *excluded[] = {
+        L"explorer.exe",
+        L"SearchHost.exe",
+        L"StartMenuExperienceHost.exe",
+        L"ShellExperienceHost.exe",
+        L"TextInputHost.exe",
+        L"LockApp.exe",
+        L"dwm.exe",
+        L"obs64.exe",
+        L"clatasha-fps-helper.exe",
+    };
+
+    for (const wchar_t *candidate : excluded) {
+        if (_wcsicmp(
+                name.c_str(),
+                candidate) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void MaybeInjectD3D11Hook(
     DWORD pid,
     const std::string &renderer)
 {
     if (pid == 0 || renderer != "D11")
         return;
+
+    if (IsD3D11InjectionExcludedProcess(pid)) {
+        gOpenGlInjectStatus[pid] = "excluded";
+        return;
+    }
 
     if (!IsNative64BitProcess(pid)) {
         gOpenGlInjectStatus[pid] = "x64-required";
