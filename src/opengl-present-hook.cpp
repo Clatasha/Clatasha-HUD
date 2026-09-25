@@ -13,6 +13,10 @@
 #define APIENTRYP APIENTRY *
 #endif
 
+#ifndef GL_FRAMEBUFFER_SRGB
+#define GL_FRAMEBUFFER_SRGB 0x8DB9
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -3049,6 +3053,8 @@ void DrawStaticHud(HDC dc)
         glIsEnabled(GL_SCISSOR_TEST);
     const GLboolean stencilWasEnabled =
         glIsEnabled(GL_STENCIL_TEST);
+    const GLboolean framebufferSrgbWasEnabled =
+        glIsEnabled(GL_FRAMEBUFFER_SRGB);
 
     glGetIntegerv(GL_BLEND_SRC, &oldBlendSrc);
     glGetIntegerv(GL_BLEND_DST, &oldBlendDst);
@@ -3062,6 +3068,10 @@ void DrawStaticHud(HDC dc)
     glDisable(GL_CULL_FACE);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_STENCIL_TEST);
+    // The HUD frame is already rendered in display-space sRGB by Qt.
+    // Letting a game's GL_FRAMEBUFFER_SRGB state remain enabled causes the
+    // HUD to be gamma-converted a second time and makes dark UI look pale.
+    glDisable(GL_FRAMEBUFFER_SRGB);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -3137,6 +3147,10 @@ void DrawStaticHud(HDC dc)
         glEnable(GL_SCISSOR_TEST);
     if (stencilWasEnabled)
         glEnable(GL_STENCIL_TEST);
+    if (framebufferSrgbWasEnabled)
+        glEnable(GL_FRAMEBUFFER_SRGB);
+    else
+        glDisable(GL_FRAMEBUFFER_SRGB);
 
     glViewport(
         viewport[0],
