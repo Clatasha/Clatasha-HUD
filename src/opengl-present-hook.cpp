@@ -35,6 +35,8 @@ enum DrawStage : LONG {
     DrawStageRendererReady = 20,
     DrawStageLiveFpsUploadEntry = 21,
     DrawStageLiveFpsUploadDone = 22,
+    DrawStageLiveObsFpsUploadEntry = 23,
+    DrawStageLiveObsFpsUploadDone = 24,
     DrawStageViewportReady = 30,
     DrawStageStateCaptured = 40,
     DrawStageOverlayStateApplied = 50,
@@ -154,13 +156,19 @@ constexpr int kFpsPatchX = 22;
 constexpr int kFpsPatchY = 0;
 constexpr int kFpsPatchWidth = 53;
 constexpr int kFpsPatchHeight = 34;
+constexpr int kObsFpsPatchX = 74;
+constexpr int kObsFpsPatchY = 3;
+constexpr int kObsFpsPatchWidth = 29;
+constexpr int kObsFpsPatchHeight = 23;
 constexpr int kMaxCachedFps = 999;
 
 GLuint g_hudTexture = 0;
 HGLRC g_hudTextureContext = nullptr;
 std::vector<std::uint8_t> g_hudPixels;
 std::vector<std::vector<std::uint8_t>> g_liveFpsPatches;
+std::vector<std::vector<std::uint8_t>> g_liveObsFpsPatches;
 LONG g_lastRenderedLiveFps = -1;
+LONG g_lastRenderedLiveObsFps = -1;
 
 bool ShouldDrawOverlay(HDC dc)
 {
@@ -272,10 +280,8 @@ bool BuildStaticHudPixels()
     // pre-rendered below during this same one-time setup and uploaded later.
     SelectObject(dc, smallBold);
     SetTextColor(dc, RGB(165, 171, 176));
-    RECT obsRect{74, 3, 103, 25};
-    DrawTextW(
-        dc, L"/60", -1, &obsRect,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    // Leave the OBS FPS rectangle clean. Its /NN value is pre-rendered into
+    // cached patches below and updated independently from game FPS.
 
     HBRUSH badgeBrush =
         CreateSolidBrush(RGB(22, 27, 32));
@@ -509,6 +515,92 @@ bool BuildStaticHudPixels()
                     b != baseFpsPatch[index + 2];
                 patch[index + 3] =
                     changed ? 255 : baseFpsPatch[index + 3];
+            }
+        }
+    }
+
+    // Reuse the same one-time GDI surface to pre-render /OBS-FPS patches.
+    SelectObject(fpsDc, smallBold);
+    SetTextColor(fpsDc, RGB(165, 171, 176));
+
+    std::vector<std::uint8_t> baseObsFpsPatch(
+        static_cast<size_t>(kObsFpsPatchWidth) *
+        static_cast<size_t>(kObsFpsPatchHeight) * 4);
+
+    for (int y = 0; y < kObsFpsPatchHeight; ++y) {
+        for (int x = 0; x < kObsFpsPatchWidth; ++x) {
+            const size_t srcIndex =
+                (static_cast<size_t>(y + kObsFpsPatchY) * kHudWidth +
+                 static_cast<size_t>(x + kObsFpsPatchX)) * 4;
+            const size_t dstIndex =
+                (static_cast<size_t>(y) * kObsFpsPatchWidth +
+                 static_cast<size_t>(x)) * 4;
+            baseObsFpsPatch[dstIndex + 0] = g_hudPixels[srcIndex + 0];
+            baseObsFpsPatch[dstIndex + 1] = g_hudPixels[srcIndex + 1];
+            baseObsFpsPatch[dstIndex + 2] = g_hudPixels[srcIndex + 2];
+            baseObsFpsPatch[dstIndex + 3] = g_hudPixels[srcIndex + 3];
+        }
+    }
+
+    g_liveObsFpsPatches.clear();
+    g_liveObsFpsPatches.resize(kMaxCachedFps + 1);
+
+    for (int obsFpsValue = 0; obsFpsValue <= kMaxCachedFps; ++obsFpsValue) {
+        for (int y = 0; y < kObsFpsPatchHeight; ++y) {
+            for (int x = 0; x < kObsFpsPatchWidth; ++x) {
+                const size_t srcIndex =
+                    (static_cast<size_t>(y) * kObsFpsPatchWidth +
+                     static_cast<size_t>(x)) * 4;
+                const size_t dstIndex =
+                    (static_cast<size_t>(y) * kFpsPatchWidth +
+                     static_cast<size_t>(x)) * 4;
+                fpsSource[dstIndex + 0] = baseObsFpsPatch[srcIndex + 2];
+                fpsSource[dstIndex + 1] = baseObsFpsPatch[srcIndex + 1];
+                fpsSource[dstIndex + 2] = baseObsFpsPatch[srcIndex + 0];
+                fpsSource[dstIndex + 3] = baseObsFpsPatch[srcIndex + 3];
+            }
+        }
+
+        wchar_t obsFpsText[16] = {};
+        swprintf_s(obsFpsText, L"/%d", obsFpsValue);
+        RECT localObsFpsRect{
+            0, 0,
+            kObsFpsPatchWidth,
+            kObsFpsPatchHeight};
+        DrawTextW(
+            fpsDc,
+            obsFpsText,
+            -1,
+            &localObsFpsRect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        auto &patch = g_liveObsFpsPatches[obsFpsValue];
+        patch.resize(
+            static_cast<size_t>(kObsFpsPatchWidth) *
+            static_cast<size_t>(kObsFpsPatchHeight) * 4);
+
+        for (int y = 0; y < kObsFpsPatchHeight; ++y) {
+            for (int x = 0; x < kObsFpsPatchWidth; ++x) {
+                const size_t srcIndex =
+                    (static_cast<size_t>(y) * kFpsPatchWidth +
+                     static_cast<size_t>(x)) * 4;
+                const size_t dstIndex =
+                    (static_cast<size_t>(y) * kObsFpsPatchWidth +
+                     static_cast<size_t>(x)) * 4;
+                const std::uint8_t b = fpsSource[srcIndex + 0];
+                const std::uint8_t g = fpsSource[srcIndex + 1];
+                const std::uint8_t r = fpsSource[srcIndex + 2];
+
+                patch[dstIndex + 0] = r;
+                patch[dstIndex + 1] = g;
+                patch[dstIndex + 2] = b;
+
+                const bool changed =
+                    r != baseObsFpsPatch[dstIndex + 0] ||
+                    g != baseObsFpsPatch[dstIndex + 1] ||
+                    b != baseObsFpsPatch[dstIndex + 2];
+                patch[dstIndex + 3] =
+                    changed ? 255 : baseObsFpsPatch[dstIndex + 3];
             }
         }
     }
@@ -816,6 +908,7 @@ bool CreateHudTexture()
         static_cast<GLuint>(oldTexture));
 
     g_lastRenderedLiveFps = -1;
+    g_lastRenderedLiveObsFps = -1;
     return true;
 }
 
@@ -827,11 +920,13 @@ void UpdateLiveFpsTexture()
         return;
     }
 
-    const LONG receivedFps =
+    const LONG packedLiveFps =
         InterlockedCompareExchange(
             &g_shared->liveFpsAck,
             0,
             0);
+    const LONG receivedFps =
+        packedLiveFps & 0xFFFF;
     if (receivedFps <= 0)
         return;
 
@@ -873,6 +968,64 @@ void UpdateLiveFpsTexture()
 
     g_lastRenderedLiveFps = clampedFps;
     SetDrawStage(DrawStageLiveFpsUploadDone);
+}
+
+void UpdateLiveObsFpsTexture()
+{
+    if (!g_shared ||
+        !g_hudTexture ||
+        g_liveObsFpsPatches.empty()) {
+        return;
+    }
+
+    const LONG packedLiveFps =
+        InterlockedCompareExchange(
+            &g_shared->liveFpsAck,
+            0,
+            0);
+    const LONG receivedObsFps =
+        (static_cast<unsigned LONG>(packedLiveFps) >> 16) & 0xFFFF;
+    if (receivedObsFps <= 0)
+        return;
+
+    const LONG clampedObsFps =
+        std::clamp<LONG>(
+            receivedObsFps,
+            0,
+            kMaxCachedFps);
+    if (clampedObsFps == g_lastRenderedLiveObsFps)
+        return;
+
+    SetDrawStage(DrawStageLiveObsFpsUploadEntry);
+
+    GLint oldTexture = 0;
+    GLint oldUnpackAlignment = 4;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &oldUnpackAlignment);
+
+    glBindTexture(GL_TEXTURE_2D, g_hudTexture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(
+        GL_TEXTURE_2D,
+        0,
+        kObsFpsPatchX,
+        kObsFpsPatchY,
+        kObsFpsPatchWidth,
+        kObsFpsPatchHeight,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        g_liveObsFpsPatches[
+            static_cast<size_t>(clampedObsFps)].data());
+
+    glPixelStorei(
+        GL_UNPACK_ALIGNMENT,
+        oldUnpackAlignment);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        static_cast<GLuint>(oldTexture));
+
+    g_lastRenderedLiveObsFps = clampedObsFps;
+    SetDrawStage(DrawStageLiveObsFpsUploadDone);
 }
 
 bool EnsureModernHudRenderer()
@@ -1019,6 +1172,7 @@ void DrawStaticHud(HDC dc)
     SetDrawStage(DrawStageRendererReady);
     InterlockedExchange(&g_shared->renderMode, 1);
     UpdateLiveFpsTexture();
+    UpdateLiveObsFpsTexture();
 
     GLint viewport[4] = {};
     glGetIntegerv(GL_VIEWPORT, viewport);
