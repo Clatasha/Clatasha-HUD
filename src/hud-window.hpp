@@ -95,6 +95,8 @@ private:
     quint64 openGlDrawCount_ = 0;
     int openGlRenderMode_ = 0;
     int openGlDrawStage_ = 0;
+    int openGlLiveFpsSent_ = 0;
+    int openGlLiveFpsAck_ = 0;
     bool gameFullscreen_ = false;
     int rendererMissSamples_ = 0;
     int gameTargetRefreshTicks_ = 0;
