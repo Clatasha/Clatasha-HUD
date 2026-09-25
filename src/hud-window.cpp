@@ -548,6 +548,8 @@ void ClatashaHudWindow::readFpsState()
         case 11: stageName = "renderer-entry"; break;
         case 15: stageName = "fallback-entry"; break;
         case 20: stageName = "renderer-ready"; break;
+        case 21: stageName = "fps-upload-entry"; break;
+        case 22: stageName = "fps-upload-done"; break;
         case 30: stageName = "viewport-ready"; break;
         case 40: stageName = "state-captured"; break;
         case 50: stageName = "overlay-state"; break;
@@ -836,6 +838,8 @@ void ClatashaHudWindow::refresh()
         case 11: openGlStageName = "renderer-entry"; break;
         case 15: openGlStageName = "fallback-entry"; break;
         case 20: openGlStageName = "renderer-ready"; break;
+        case 21: openGlStageName = "fps-upload-entry"; break;
+        case 22: openGlStageName = "fps-upload-done"; break;
         case 30: openGlStageName = "viewport-ready"; break;
         case 40: openGlStageName = "state-captured"; break;
         case 50: openGlStageName = "overlay-state"; break;
