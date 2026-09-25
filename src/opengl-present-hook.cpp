@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cwchar>
+#include <vector>
 
 namespace {
 
@@ -104,7 +105,15 @@ bool IsFullscreenWindow(HWND hwnd)
            bottomRight.y >= screen.bottom - tolerance;
 }
 
-bool ShouldDrawMarker(HDC dc)
+constexpr int kHudWidth = 145;
+constexpr int kHudHeight = 50;
+constexpr int kHudMargin = 12;
+
+GLuint g_hudTexture = 0;
+HGLRC g_hudTextureContext = nullptr;
+std::vector<std::uint8_t> g_hudPixels;
+
+bool ShouldDrawOverlay(HDC dc)
 {
     if (!g_shared ||
         InterlockedCompareExchange(&g_shared->drawMarker, 0, 0) == 0 ||
@@ -119,54 +128,347 @@ bool ShouldDrawMarker(HDC dc)
     return IsFullscreenWindow(WindowFromDC(dc));
 }
 
-void DrawTestMarker(HDC dc)
+void DrawMeter(HDC dc, int x, int y)
 {
-    if (!ShouldDrawMarker(dc))
+    constexpr int segments = 6;
+    constexpr int segmentHeight = 4;
+    constexpr int gap = 1;
+
+    HBRUSH active = CreateSolidBrush(RGB(31, 218, 102));
+    HBRUSH inactive = CreateSolidBrush(RGB(49, 55, 59));
+
+    for (int i = 0; i < segments; ++i) {
+        const int sy = y + 29 - segmentHeight -
+                       i * (segmentHeight + gap);
+        RECT r{x, sy, x + 3, sy + segmentHeight};
+        FillRect(dc, &r, i < 4 ? active : inactive);
+    }
+
+    DeleteObject(active);
+    DeleteObject(inactive);
+}
+
+bool BuildStaticHudPixels()
+{
+    if (!g_hudPixels.empty())
+        return true;
+
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc)
+        return false;
+
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = kHudWidth;
+    info.bmiHeader.biHeight = -kHudHeight;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void *bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(
+        dc,
+        &info,
+        DIB_RGB_COLORS,
+        &bits,
+        nullptr,
+        0);
+    if (!bitmap || !bits) {
+        if (bitmap)
+            DeleteObject(bitmap);
+        DeleteDC(dc);
+        return false;
+    }
+
+    HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
+    ZeroMemory(
+        bits,
+        static_cast<SIZE_T>(kHudWidth) *
+            static_cast<SIZE_T>(kHudHeight) * 4);
+
+    HPEN borderPen =
+        CreatePen(PS_SOLID, 1, RGB(100, 109, 116));
+    HBRUSH panelBrush =
+        CreateSolidBrush(RGB(8, 10, 12));
+    HGDIOBJ oldPen = SelectObject(dc, borderPen);
+    HGDIOBJ oldBrush = SelectObject(dc, panelBrush);
+    RoundRect(dc, 0, 0, kHudWidth, kHudHeight, 8, 8);
+
+    DrawMeter(dc, 5, 5);
+    DrawMeter(dc, 17, 5);
+
+    SetBkMode(dc, TRANSPARENT);
+
+    HFONT fpsFont = CreateFontW(
+        -29, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT smallBold = CreateFontW(
+        -12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT tinyFont = CreateFontW(
+        -9, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    HFONT oldFont =
+        static_cast<HFONT>(SelectObject(dc, fpsFont));
+    SetTextColor(dc, RGB(45, 143, 255));
+    RECT fpsRect{22, -2, 75, 34};
+    DrawTextW(
+        dc, L"60", -1, &fpsRect,
+        DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+    SelectObject(dc, smallBold);
+    SetTextColor(dc, RGB(165, 171, 176));
+    RECT obsRect{74, 3, 103, 25};
+    DrawTextW(
+        dc, L"/60", -1, &obsRect,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    HBRUSH badgeBrush =
+        CreateSolidBrush(RGB(22, 27, 32));
+    HPEN badgePen =
+        CreatePen(PS_SOLID, 1, RGB(96, 106, 116));
+    SelectObject(dc, badgeBrush);
+    SelectObject(dc, badgePen);
+    RoundRect(dc, 102, 2, 126, 13, 4, 4);
+
+    SelectObject(dc, tinyFont);
+    SetTextColor(dc, RGB(210, 216, 221));
+    RECT oglRect{102, 2, 126, 13};
+    DrawTextW(
+        dc, L"OGL", -1, &oglRect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    SetTextColor(dc, RGB(205, 209, 212));
+    RECT timerRect{23, 28, 92, 44};
+    DrawTextW(
+        dc, L"0:12:34", -1, &timerRect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    HBRUSH dotBrush =
+        CreateSolidBrush(RGB(158, 164, 169));
+    SelectObject(dc, dotBrush);
+    SelectObject(dc, GetStockObject(NULL_PEN));
+    Ellipse(dc, 102, 22, 106, 26);
+    Ellipse(dc, 108, 22, 112, 26);
+    Ellipse(dc, 114, 22, 118, 26);
+
+    SetTextColor(dc, RGB(165, 171, 176));
+    RECT diskRect{94, 36, 135, 49};
+    DrawTextW(
+        dc, L"123 GB", -1, &diskRect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    HPEN iconPen =
+        CreatePen(PS_SOLID, 1, RGB(174, 181, 187));
+    SelectObject(dc, iconPen);
+    SelectObject(dc, GetStockObject(NULL_BRUSH));
+    Rectangle(dc, 3, 38, 10, 43);
+    MoveToEx(dc, 6, 43, nullptr);
+    LineTo(dc, 6, 46);
+    MoveToEx(dc, 4, 46, nullptr);
+    LineTo(dc, 9, 46);
+
+    RoundRect(dc, 15, 37, 19, 43, 3, 3);
+    Arc(dc, 14, 39, 20, 45, 14, 41, 20, 41);
+    MoveToEx(dc, 17, 44, nullptr);
+    LineTo(dc, 17, 47);
+
+    HBRUSH logoBrush =
+        CreateSolidBrush(RGB(240, 243, 245));
+    SelectObject(dc, logoBrush);
+    SelectObject(dc, GetStockObject(NULL_PEN));
+    Ellipse(dc, 128, 2, 143, 17);
+
+    SelectObject(dc, smallBold);
+    SetTextColor(dc, RGB(18, 22, 26));
+    RECT logoRect{128, 1, 143, 18};
+    DrawTextW(
+        dc, L"C", -1, &logoRect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    const auto *source =
+        static_cast<const std::uint8_t *>(bits);
+    g_hudPixels.resize(
+        static_cast<size_t>(kHudWidth) *
+        static_cast<size_t>(kHudHeight) * 4);
+
+    for (int y = 0; y < kHudHeight; ++y) {
+        for (int x = 0; x < kHudWidth; ++x) {
+            const size_t index =
+                (static_cast<size_t>(y) * kHudWidth + x) * 4;
+            const std::uint8_t b = source[index + 0];
+            const std::uint8_t g = source[index + 1];
+            const std::uint8_t r = source[index + 2];
+
+            g_hudPixels[index + 0] = r;
+            g_hudPixels[index + 1] = g;
+            g_hudPixels[index + 2] = b;
+
+            if (r == 0 && g == 0 && b == 0) {
+                g_hudPixels[index + 3] = 0;
+            } else if (r <= 14 && g <= 16 && b <= 18) {
+                g_hudPixels[index + 3] = 238;
+            } else {
+                g_hudPixels[index + 3] = 255;
+            }
+        }
+    }
+
+    SelectObject(dc, oldFont);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldBitmap);
+
+    DeleteObject(iconPen);
+    DeleteObject(dotBrush);
+    DeleteObject(logoBrush);
+    DeleteObject(badgePen);
+    DeleteObject(badgeBrush);
+    DeleteObject(tinyFont);
+    DeleteObject(smallBold);
+    DeleteObject(fpsFont);
+    DeleteObject(panelBrush);
+    DeleteObject(borderPen);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+
+    return true;
+}
+
+bool EnsureHudTexture()
+{
+    const HGLRC currentContext = wglGetCurrentContext();
+    if (!currentContext)
+        return false;
+
+    if (g_hudTexture != 0 &&
+        g_hudTextureContext == currentContext) {
+        return true;
+    }
+
+    g_hudTexture = 0;
+    g_hudTextureContext = currentContext;
+
+    if (!BuildStaticHudPixels())
+        return false;
+
+    GLint oldTexture = 0;
+    GLint oldUnpackAlignment = 4;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &oldUnpackAlignment);
+
+    glGenTextures(1, &g_hudTexture);
+    if (g_hudTexture == 0)
+        return false;
+
+    glBindTexture(GL_TEXTURE_2D, g_hudTexture);
+    glTexParameteri(
+        GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(
+        GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(
+        GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(
+        GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA,
+        kHudWidth,
+        kHudHeight,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        g_hudPixels.data());
+
+    glPixelStorei(
+        GL_UNPACK_ALIGNMENT,
+        oldUnpackAlignment);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        static_cast<GLuint>(oldTexture));
+
+    return true;
+}
+
+void DrawStaticHud(HDC dc)
+{
+    if (!ShouldDrawOverlay(dc) || !EnsureHudTexture())
         return;
 
     GLint viewport[4] = {};
-    GLint oldScissor[4] = {};
-    GLfloat oldClearColor[4] = {};
-    GLboolean oldColorMask[4] = {};
-    const GLboolean scissorWasEnabled =
-        glIsEnabled(GL_SCISSOR_TEST);
-
+    GLint oldMatrixMode = GL_MODELVIEW;
     glGetIntegerv(GL_VIEWPORT, viewport);
-    if (viewport[2] < 64 || viewport[3] < 64)
+    glGetIntegerv(GL_MATRIX_MODE, &oldMatrixMode);
+
+    if (viewport[2] < kHudWidth + kHudMargin * 2 ||
+        viewport[3] < kHudHeight + kHudMargin * 2) {
         return;
+    }
 
-    glGetIntegerv(GL_SCISSOR_BOX, oldScissor);
-    glGetFloatv(GL_COLOR_CLEAR_VALUE, oldClearColor);
-    glGetBooleanv(GL_COLOR_WRITEMASK, oldColorMask);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
 
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(
-        viewport[0] + viewport[2] - 30,
-        viewport[1] + viewport[3] - 30,
-        18,
-        18);
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glClearColor(0.10f, 1.0f, 0.20f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, g_hudTexture);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
-    glColorMask(
-        oldColorMask[0],
-        oldColorMask[1],
-        oldColorMask[2],
-        oldColorMask[3]);
-    glClearColor(
-        oldClearColor[0],
-        oldClearColor[1],
-        oldClearColor[2],
-        oldClearColor[3]);
-    glScissor(
-        oldScissor[0],
-        oldScissor[1],
-        oldScissor[2],
-        oldScissor[3]);
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(
+        0.0,
+        static_cast<GLdouble>(viewport[2]),
+        0.0,
+        static_cast<GLdouble>(viewport[3]),
+        -1.0,
+        1.0);
 
-    if (!scissorWasEnabled)
-        glDisable(GL_SCISSOR_TEST);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    const GLfloat left =
+        static_cast<GLfloat>(
+            viewport[2] - kHudWidth - kHudMargin);
+    const GLfloat right =
+        left + static_cast<GLfloat>(kHudWidth);
+    const GLfloat top =
+        static_cast<GLfloat>(
+            viewport[3] - kHudMargin);
+    const GLfloat bottom =
+        top - static_cast<GLfloat>(kHudHeight);
+
+    glBegin(GL_QUADS);
+    glTexCoord2f(0.0f, 1.0f);
+    glVertex2f(left, bottom);
+    glTexCoord2f(1.0f, 1.0f);
+    glVertex2f(right, bottom);
+    glTexCoord2f(1.0f, 0.0f);
+    glVertex2f(right, top);
+    glTexCoord2f(0.0f, 0.0f);
+    glVertex2f(left, top);
+    glEnd();
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(oldMatrixMode);
+
+    glPopAttrib();
 
     InterlockedIncrement64(&g_shared->drawCount);
     InterlockedExchange64(
@@ -178,7 +480,7 @@ void SwapBegin(HDC dc)
 {
     if (g_swapDepth++ == 0) {
         RecordPresent();
-        DrawTestMarker(dc);
+        DrawStaticHud(dc);
     }
 }
 

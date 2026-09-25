@@ -487,7 +487,7 @@ void ClatashaHudWindow::readFpsState()
     if (openGlDrawArmed != openGlDrawArmed_) {
         openGlDrawArmed_ = openGlDrawArmed;
         blog(LOG_INFO,
-             "[Clatasha HUD] OpenGL fullscreen marker PID %u: %s",
+             "[Clatasha HUD] OpenGL fullscreen HUD PID %u: %s",
              trackedGamePid_,
              openGlDrawArmed_ ? "armed" : "idle");
     }

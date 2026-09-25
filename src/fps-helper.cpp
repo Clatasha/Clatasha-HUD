@@ -455,7 +455,7 @@ struct OpenGlSample {
     std::uint64_t drawCount = 0;
 };
 
-OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armMarker)
+OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armOverlay)
 {
     OpenGlSample result;
     if (pid == 0)
@@ -493,7 +493,7 @@ OpenGlSample ReadOpenGlSample(DWORD pid, ULONGLONG now, bool armMarker)
         shared->pid == pid) {
         InterlockedExchange(
             &shared->drawMarker,
-            armMarker ? 1 : 0);
+            armOverlay ? 1 : 0);
 
         const LONG state = shared->hookState;
         result.hookedMask = shared->hookedMask;
