@@ -26,6 +26,21 @@ enum HookBits : LONG {
     HookWglSwapLayerBuffers = 1 << 2,
 };
 
+enum DrawStage : LONG {
+    DrawStageIdle = 0,
+    DrawStageEligible = 10,
+    DrawStageRendererEntry = 11,
+    DrawStageFallbackEntry = 15,
+    DrawStageRendererReady = 20,
+    DrawStageViewportReady = 30,
+    DrawStageStateCaptured = 40,
+    DrawStageOverlayStateApplied = 50,
+    DrawStageVerticesUploaded = 60,
+    DrawStageDrawReturned = 70,
+    DrawStageStateRestored = 80,
+    DrawStageComplete = 90,
+};
+
 struct alignas(8) OpenGlPresentShared {
     std::uint32_t magic;
     std::uint32_t version;
@@ -36,7 +51,7 @@ struct alignas(8) OpenGlPresentShared {
     volatile LONG hookState; // 0 = starting, 1 = active, 2 = failed
     volatile LONG hookedMask;
     volatile LONG drawMarker;
-    volatile LONG reservedControl;
+    volatile LONG reservedControl; // draw-stage diagnostic; layout unchanged
     volatile LONG64 drawCount;
     volatile LONG64 lastDrawTick;
     volatile LONG renderMode; // 0 = idle, 1 = modern shader, 2 = fallback marker
@@ -73,6 +88,12 @@ void RecordPresent()
     InterlockedExchange64(
         &g_shared->lastPresentTick,
         static_cast<LONG64>(GetTickCount64()));
+}
+
+void SetDrawStage(LONG stage)
+{
+    if (g_shared)
+        InterlockedExchange(&g_shared->reservedControl, stage);
 }
 
 bool IsFullscreenWindow(HWND hwnd)
@@ -750,10 +771,14 @@ void DrawFallbackMarker()
 
 void DrawStaticHud(HDC dc)
 {
+    SetDrawStage(DrawStageIdle);
     if (!ShouldDrawOverlay(dc))
         return;
 
+    SetDrawStage(DrawStageEligible);
+    SetDrawStage(DrawStageRendererEntry);
     if (!EnsureModernHudRenderer()) {
+        SetDrawStage(DrawStageFallbackEntry);
         InterlockedExchange(&g_shared->renderMode, 2);
         DrawFallbackMarker();
 
@@ -761,9 +786,11 @@ void DrawStaticHud(HDC dc)
         InterlockedExchange64(
             &g_shared->lastDrawTick,
             static_cast<LONG64>(GetTickCount64()));
+        SetDrawStage(DrawStageComplete);
         return;
     }
 
+    SetDrawStage(DrawStageRendererReady);
     InterlockedExchange(&g_shared->renderMode, 1);
 
     GLint viewport[4] = {};
@@ -772,6 +799,7 @@ void DrawStaticHud(HDC dc)
         viewport[3] < kHudHeight + kHudMargin * 2) {
         return;
     }
+    SetDrawStage(DrawStageViewportReady);
 
     const GLfloat leftPx =
         static_cast<GLfloat>(
@@ -840,6 +868,7 @@ void DrawStaticHud(HDC dc)
 
     g_glActiveTexture(GL_TEXTURE0);
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture0);
+    SetDrawStage(DrawStageStateCaptured);
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -848,6 +877,7 @@ void DrawStaticHud(HDC dc)
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    SetDrawStage(DrawStageOverlayStateApplied);
 
     g_glUseProgram(g_hudProgram);
     g_glBindVertexArray(g_hudVao);
@@ -857,10 +887,12 @@ void DrawStaticHud(HDC dc)
         static_cast<GlSizePtr>(sizeof(vertices)),
         vertices,
         GL_STREAM_DRAW);
+    SetDrawStage(DrawStageVerticesUploaded);
 
     glBindTexture(GL_TEXTURE_2D, g_hudTexture);
     g_glUniform1i(g_hudSampler, 0);
     glDrawArrays(GL_TRIANGLES, 0, 6);
+    SetDrawStage(DrawStageDrawReturned);
 
     glBindTexture(
         GL_TEXTURE_2D,
@@ -892,11 +924,13 @@ void DrawStaticHud(HDC dc)
         glEnable(GL_SCISSOR_TEST);
     if (stencilWasEnabled)
         glEnable(GL_STENCIL_TEST);
+    SetDrawStage(DrawStageStateRestored);
 
     InterlockedIncrement64(&g_shared->drawCount);
     InterlockedExchange64(
         &g_shared->lastDrawTick,
         static_cast<LONG64>(GetTickCount64()));
+    SetDrawStage(DrawStageComplete);
 }
 
 void SwapBegin(HDC dc)
