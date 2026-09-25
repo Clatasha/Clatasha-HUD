@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cwchar>
 #include <string>
 #include <vector>
@@ -90,12 +91,6 @@ WglSwapLayerBuffersFn g_realWglSwapLayerBuffers = nullptr;
 
 HANDLE g_sharedMapping = nullptr;
 OpenGlPresentShared *g_shared = nullptr;
-HANDLE g_frameMapping = nullptr;
-HudFrameShared *g_frameShared = nullptr;
-LONG g_lastFrameSequence = -1;
-bool g_usingSharedHudFrame = false;
-std::vector<std::uint8_t> g_sharedFrameScratch(
-    static_cast<size_t>(kHudFrameBytes));
 thread_local LONG g_swapDepth = 0;
 
 void SetHookState(LONG state, LONG mask)
@@ -192,6 +187,13 @@ struct alignas(8) HudFrameShared {
     volatile LONG activeIndex;
     std::uint8_t pixels[2][kHudFrameBytes];
 };
+
+HANDLE g_frameMapping = nullptr;
+HudFrameShared *g_frameShared = nullptr;
+LONG g_lastFrameSequence = -1;
+bool g_usingSharedHudFrame = false;
+std::vector<std::uint8_t> g_sharedFrameScratch(
+    static_cast<size_t>(kHudFrameBytes));
 constexpr int kFpsPatchX = 22;
 constexpr int kFpsPatchY = 0;
 constexpr int kFpsPatchWidth = 53;
