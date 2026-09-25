@@ -88,6 +88,7 @@ WglSwapLayerBuffersFn g_realWglSwapLayerBuffers = nullptr;
 
 HANDLE g_sharedMapping = nullptr;
 OpenGlPresentShared *g_shared = nullptr;
+HINSTANCE g_moduleInstance = nullptr;
 thread_local LONG g_swapDepth = 0;
 
 void SetHookState(LONG state, LONG mask)
@@ -1071,7 +1072,6 @@ GLuint g_hudVao = 0;
 GLuint g_hudVbo = 0;
 GLint g_hudSampler = -1;
 GLint g_hudOpacity = -1;
-HINSTANCE g_moduleInstance = nullptr;
 HGLRC g_modernContext = nullptr;
 bool g_modernLoadFailed = false;
 
