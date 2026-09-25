@@ -173,12 +173,16 @@ bool IsFullscreenWindow(HWND hwnd)
 
 constexpr int kHudWidth = 145;
 constexpr int kHudHeight = 50;
+constexpr int kRecordingWarningHeight = 28;
+constexpr int kHudFrameHeight =
+    kHudHeight + kRecordingWarningHeight;
 constexpr int kHudMargin = 12;
 
 constexpr std::uint32_t kHudFrameMagic = 0x52464843; // CHFR
-constexpr std::uint32_t kHudFrameVersion = 2;
+constexpr std::uint32_t kHudFrameVersion = 3;
 constexpr int kHudFrameStride = kHudWidth * 4;
-constexpr int kHudFrameBytes = kHudFrameStride * kHudHeight;
+constexpr int kHudFrameBytes =
+    kHudFrameStride * kHudFrameHeight;
 
 struct alignas(8) HudFrameShared {
     std::uint32_t magic;
@@ -1865,16 +1869,36 @@ bool CreateHudTexture()
     glTexParameteri(
         GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+    // The texture reserves the extra transparent warning strip used by
+    // shared Qt frames. Legacy OGL fallback content remains 145x50 at the top.
+    std::vector<std::uint8_t> initialPixels(
+        static_cast<size_t>(
+            kHudFrameBytes),
+        0);
+    for (int y = 0;
+         y < kHudHeight;
+         ++y) {
+        std::memcpy(
+            initialPixels.data() +
+                static_cast<size_t>(y) *
+                    kHudFrameStride,
+            g_hudPixels.data() +
+                static_cast<size_t>(y) *
+                    kHudFrameStride,
+            kHudFrameStride);
+    }
+
     glTexImage2D(
         GL_TEXTURE_2D,
         0,
         GL_RGBA,
         kHudWidth,
-        kHudHeight,
+        kHudFrameHeight,
         0,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
-        g_hudPixels.data());
+        initialPixels.data());
 
     glPixelStorei(
         GL_UNPACK_ALIGNMENT,
@@ -2755,7 +2779,7 @@ bool UpdateSharedHudFrameTexture()
         0,
         0,
         kHudWidth,
-        kHudHeight,
+        kHudFrameHeight,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
         g_sharedFrameScratch.data());
@@ -2990,8 +3014,17 @@ void DrawStaticHud(HDC dc)
         }
     }
 
-    if (drawWidth < kHudWidth + kHudMargin * 2 ||
-        drawHeight < kHudHeight + kHudMargin * 2) {
+    const int renderedHudHeight =
+        sharedHudReady
+            ? kHudFrameHeight
+            : kHudHeight;
+
+    if (drawWidth <
+            kHudWidth +
+                kHudMargin * 2 ||
+        drawHeight <
+            renderedHudHeight +
+                kHudMargin * 2) {
         return;
     }
     SetDrawStage(DrawStageViewportReady);
@@ -3036,11 +3069,11 @@ void DrawStaticHud(HDC dc)
             : static_cast<GLfloat>(
                   drawHeight -
                   kHudMargin -
-                  kHudHeight);
+                  renderedHudHeight);
     const GLfloat topPx =
         bottomPx +
         static_cast<GLfloat>(
-            kHudHeight);
+            renderedHudHeight);
 
     const auto ndcX = [drawWidth](GLfloat px) {
         return px * 2.0f /
@@ -3058,11 +3091,19 @@ void DrawStaticHud(HDC dc)
     const GLfloat top = ndcY(topPx);
     const GLfloat bottom = ndcY(bottomPx);
 
+    const GLfloat textureBottomV =
+        sharedHudReady
+            ? 1.0f
+            : static_cast<GLfloat>(
+                  kHudHeight) /
+                  static_cast<GLfloat>(
+                      kHudFrameHeight);
+
     const GLfloat vertices[] = {
-        left,  bottom, 0.0f, 1.0f,
-        right, bottom, 1.0f, 1.0f,
+        left,  bottom, 0.0f, textureBottomV,
+        right, bottom, 1.0f, textureBottomV,
         right, top,    1.0f, 0.0f,
-        left,  bottom, 0.0f, 1.0f,
+        left,  bottom, 0.0f, textureBottomV,
         right, top,    1.0f, 0.0f,
         left,  top,    0.0f, 0.0f,
     };
@@ -3343,7 +3384,7 @@ bool CreateHudFrameState()
     g_frameShared->width =
         kHudWidth;
     g_frameShared->height =
-        kHudHeight;
+        kHudFrameHeight;
     g_frameShared->stride =
         kHudFrameStride;
 
