@@ -173,18 +173,18 @@ constexpr int kFpsPatchX = 22;
 constexpr int kFpsPatchY = 0;
 constexpr int kFpsPatchWidth = 53;
 constexpr int kFpsPatchHeight = 34;
-constexpr int kFpsUploadHeight = 27;
+constexpr int kFpsUploadHeight = 34;
 constexpr int kObsFpsPatchX = 74;
 constexpr int kObsFpsPatchY = 3;
 constexpr int kObsFpsPatchWidth = 29;
 constexpr int kObsFpsPatchHeight = 23;
-constexpr int kTimerPatchX = 21;
-constexpr int kTimerPatchY = 27;
-constexpr int kTimerPatchWidth = 73;
-constexpr int kTimerPatchHeight = 18;
-constexpr int kTimerGlyphWidth = 10;
-constexpr int kTimerGlyphHeight = 18;
-constexpr int kTimerGlyphAdvance = 9;
+constexpr int kTimerPatchX = 23;
+constexpr int kTimerPatchY = 29;
+constexpr int kTimerPatchWidth = 69;
+constexpr int kTimerPatchHeight = 14;
+constexpr int kTimerGlyphWidth = 8;
+constexpr int kTimerGlyphHeight = 14;
+constexpr int kTimerGlyphAdvance = 7;
 constexpr int kTimerGlyphCount = 11;
 constexpr int kAudioPatchX = 4;
 constexpr int kAudioPatchY = 5;
@@ -237,6 +237,7 @@ LONG g_lastRenderedAudioLevels = -1;
 LONG g_lastRenderedHudStatus = -1;
 LONG g_lastRenderedDiskTenths = -1;
 bool g_lastRenderedSessionActive = false;
+bool g_forceTimerReupload = false;
 ULONGLONG g_lastStatusAnimationTick = 0;
 
 bool ShouldDrawOverlay(HDC dc)
@@ -896,6 +897,11 @@ bool BuildStaticHudPixels()
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT diskFont = CreateFontW(
+        -9, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
     HFONT oldFont =
         static_cast<HFONT>(SelectObject(dc, fpsFont));
@@ -1022,7 +1028,8 @@ bool BuildStaticHudPixels()
             DeleteObject(badgePen);
         if (badgeBrush)
             DeleteObject(badgeBrush);
-        DeleteObject(tinyFont);
+        DeleteObject(diskFont);
+    DeleteObject(tinyFont);
         DeleteObject(smallBold);
         DeleteObject(fpsFont);
                           DeleteObject(bitmap);
@@ -1062,6 +1069,7 @@ bool BuildStaticHudPixels()
             DeleteObject(badgePen);
         if (badgeBrush)
             DeleteObject(badgeBrush);
+        DeleteObject(diskFont);
         DeleteObject(tinyFont);
         DeleteObject(smallBold);
         DeleteObject(fpsFont);
@@ -1445,7 +1453,7 @@ bool BuildStaticHudPixels()
     }
     g_diskScratch = g_diskBasePatch;
 
-    SelectObject(fpsDc, tinyFont);
+    SelectObject(fpsDc, diskFont);
     SetBkMode(fpsDc, TRANSPARENT);
     SetTextColor(fpsDc, RGB(165, 171, 176));
     g_diskGlyphs.clear();
@@ -1547,7 +1555,8 @@ bool BuildStaticHudPixels()
         DeleteObject(badgePen);
     if (badgeBrush)
         DeleteObject(badgeBrush);
-    DeleteObject(tinyFont);
+    DeleteObject(diskFont);
+        DeleteObject(tinyFont);
     DeleteObject(smallBold);
     DeleteObject(fpsFont);
               DeleteObject(bitmap);
@@ -1848,6 +1857,7 @@ bool CreateHudTexture()
     g_lastRenderedHudStatus = -1;
     g_lastRenderedDiskTenths = -1;
     g_lastRenderedSessionActive = false;
+    g_forceTimerReupload = true;
     g_lastStatusAnimationTick = 0;
     InterlockedExchange(&g_shared->liveSessionSecondsAck, 0);
     InterlockedExchange(&g_shared->liveAudioLevelsAck, 0);
@@ -1957,6 +1967,7 @@ void UpdateLiveFpsTexture()
 
     g_lastRenderedLiveFps = clampedFps;
     g_lastRenderedSessionActive = sessionActive;
+    g_forceTimerReupload = true;
     SetDrawStage(DrawStageLiveFpsUploadDone);
 }
 
@@ -2039,8 +2050,10 @@ void UpdateLiveSessionTimerTexture()
             receivedSeconds,
             0,
             kMaxTimerSeconds);
-    if (clampedSeconds == g_lastRenderedSessionSeconds)
+    if (clampedSeconds == g_lastRenderedSessionSeconds &&
+        !g_forceTimerReupload) {
         return;
+    }
 
     const LONG hours = clampedSeconds / 3600;
     const LONG minutes = (clampedSeconds % 3600) / 60;
@@ -2154,6 +2167,7 @@ void UpdateLiveSessionTimerTexture()
         static_cast<GLuint>(oldTexture));
 
     g_lastRenderedSessionSeconds = clampedSeconds;
+    g_forceTimerReupload = false;
     InterlockedExchange(
         &g_shared->liveSessionSecondsAck,
         clampedSeconds);
@@ -2353,10 +2367,15 @@ void UpdateLiveHudStatusTexture()
             const auto &glyph =
                 g_diskGlyphs[
                     static_cast<size_t>(glyphIndex)];
-            const int dstX =
+            int dstX =
                 startX +
                 static_cast<int>(charIndex) *
                     kDiskGlyphAdvance;
+            if (charIndex > 0 &&
+                diskText[charIndex] == L'B' &&
+                diskText[charIndex - 1] == L'G') {
+                dstX += 1;
+            }
 
             for (int y = 0;
                  y < kDiskGlyphHeight;
