@@ -39,7 +39,7 @@ constexpr double kFpsSmoothingAlpha = 0.45;
 
 #ifdef Q_OS_WIN
 constexpr std::uint32_t kOpenGlSharedMagic = 0x4C474F43;
-constexpr std::uint32_t kOpenGlSharedVersion = 3;
+constexpr std::uint32_t kOpenGlSharedVersion = 4;
 
 struct alignas(8) OpenGlPresentSharedTransport {
     std::uint32_t magic;
@@ -56,9 +56,13 @@ struct alignas(8) OpenGlPresentSharedTransport {
     volatile LONG64 lastDrawTick;
     volatile LONG renderMode;
     volatile LONG liveFpsInput;
+    volatile LONG liveSessionSeconds;
+    volatile LONG liveSessionSecondsAck;
 };
 
-void PublishOpenGlObsFps(quint32 pid, double obsFps)
+void PublishOpenGlLiveState(quint32 pid,
+                            double obsFps,
+                            LONG sessionSeconds)
 {
     if (pid == 0 || !std::isfinite(obsFps) || obsFps <= 0.0)
         return;
@@ -114,6 +118,10 @@ void PublishOpenGlObsFps(quint32 pid, double obsFps)
                 &shared->liveFpsInput,
                 nextPacked,
                 packed) != packed);
+
+        InterlockedExchange(
+            &shared->liveSessionSeconds,
+            std::max<LONG>(0, sessionSeconds));
     }
 
     UnmapViewOfFile(shared);
@@ -421,6 +429,8 @@ void ClatashaHudWindow::updateForegroundGame()
     openGlLiveFpsAck_ = 0;
     openGlLiveObsFpsSent_ = 0;
     openGlLiveObsFpsAck_ = 0;
+    openGlLiveTimerSent_ = 0;
+    openGlLiveTimerAck_ = 0;
     gameFullscreen_ = false;
     rendererMissSamples_ = 0;
     update();
@@ -499,6 +509,8 @@ void ClatashaHudWindow::readFpsState()
     int openGlLiveFpsAck = 0;
     int openGlLiveObsFpsSent = 0;
     int openGlLiveObsFpsAck = 0;
+    int openGlLiveTimerSent = 0;
+    int openGlLiveTimerAck = 0;
     bool fullscreen = false;
 
     while (!file.atEnd()) {
@@ -576,6 +588,20 @@ void ClatashaHudWindow::readFpsState()
                 fields.at(13).toInt(&liveObsFpsAckOk);
             if (liveObsFpsAckOk)
                 openGlLiveObsFpsAck = parsedLiveObsFpsAck;
+        }
+        if (fields.size() >= 15) {
+            bool liveTimerSentOk = false;
+            const int parsedLiveTimerSent =
+                fields.at(14).toInt(&liveTimerSentOk);
+            if (liveTimerSentOk)
+                openGlLiveTimerSent = parsedLiveTimerSent;
+        }
+        if (fields.size() >= 16) {
+            bool liveTimerAckOk = false;
+            const int parsedLiveTimerAck =
+                fields.at(15).toInt(&liveTimerAckOk);
+            if (liveTimerAckOk)
+                openGlLiveTimerAck = parsedLiveTimerAck;
         }
 
         if (fpsOk && std::isfinite(value) && value > 0.0 && value < 2000.0) {
@@ -656,6 +682,8 @@ void ClatashaHudWindow::readFpsState()
         case 22: stageName = "fps-upload-done"; break;
         case 23: stageName = "obs-fps-upload-entry"; break;
         case 24: stageName = "obs-fps-upload-done"; break;
+        case 25: stageName = "timer-upload-entry"; break;
+        case 26: stageName = "timer-upload-done"; break;
         case 30: stageName = "viewport-ready"; break;
         case 40: stageName = "state-captured"; break;
         case 50: stageName = "overlay-state"; break;
@@ -682,6 +710,8 @@ void ClatashaHudWindow::readFpsState()
     openGlLiveFpsAck_ = openGlLiveFpsAck;
     openGlLiveObsFpsSent_ = openGlLiveObsFpsSent;
     openGlLiveObsFpsAck_ = openGlLiveObsFpsAck;
+    openGlLiveTimerSent_ = openGlLiveTimerSent;
+    openGlLiveTimerAck_ = openGlLiveTimerAck;
 
     if (firstLiveFpsAck) {
         blog(LOG_INFO,
@@ -904,7 +934,17 @@ void ClatashaHudWindow::refresh()
     }
 
 #ifdef Q_OS_WIN
-    PublishOpenGlObsFps(trackedGamePid_, obsFps_);
+    const LONG liveSessionSeconds =
+        (sessionActive && sessionTimer_.isValid())
+            ? static_cast<LONG>(
+                  std::max<qint64>(
+                      0,
+                      sessionTimer_.elapsed() / 1000))
+            : 0;
+    PublishOpenGlLiveState(
+        trackedGamePid_,
+        obsFps_,
+        liveSessionSeconds);
 #endif
 
     if (++fpsStateRefreshTicks_ >= 2) {
@@ -966,6 +1006,8 @@ void ClatashaHudWindow::refresh()
         case 22: openGlStageName = "fps-upload-done"; break;
         case 23: openGlStageName = "obs-fps-upload-entry"; break;
         case 24: openGlStageName = "obs-fps-upload-done"; break;
+        case 25: openGlStageName = "timer-upload-entry"; break;
+        case 26: openGlStageName = "timer-upload-done"; break;
         case 30: openGlStageName = "viewport-ready"; break;
         case 40: openGlStageName = "state-captured"; break;
         case 50: openGlStageName = "overlay-state"; break;
@@ -976,7 +1018,7 @@ void ClatashaHudWindow::refresh()
         }
 
         blog(LOG_INFO,
-             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s ogl_draw=%s draws=%llu ogl_render=%s ogl_stage=%d(%s) ogl_fps_tx=%d ogl_fps_rx=%d ogl_obs_tx=%d ogl_obs_rx=%d",
+             "[Clatasha HUD] FPS status: target_pid=%u helper=%s fps=%s ogl_hook=%s ogl_draw=%s draws=%llu ogl_render=%s ogl_stage=%d(%s) ogl_fps_tx=%d ogl_fps_rx=%d ogl_obs_tx=%d ogl_obs_rx=%d ogl_timer_tx=%d ogl_timer_rx=%d",
              trackedGamePid_,
              helperAlive ? "running" : "stopped",
              gameFpsValid_ ? QString::number(gameFps_, 'f', 1).toUtf8().constData() : "--",
@@ -993,7 +1035,9 @@ void ClatashaHudWindow::refresh()
              openGlLiveFpsSent_,
              openGlLiveFpsAck_,
              openGlLiveObsFpsSent_,
-             openGlLiveObsFpsAck_);
+             openGlLiveObsFpsAck_,
+             openGlLiveTimerSent_,
+             openGlLiveTimerAck_);
     }
 
     if (++audioRefreshTicks_ >= 20) {
