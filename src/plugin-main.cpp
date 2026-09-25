@@ -1871,10 +1871,18 @@ bool applyVideoOpacityFilter(obs_source_t *source, int opacityPercent)
         return false;
 
     constexpr const char *kOpacityFilterName = "Clatasha Overlay Opacity";
-    const double opacity = qBound(10, opacityPercent, 100) / 100.0;
+
+    // We create the legacy "color_filter" source below, whose opacity
+    // setting is an integer percentage (0..100). Passing 0.0..1.0 here made
+    // Video/Both overlays nearly transparent in OBS.
+    const int opacity =
+        qBound(10, opacityPercent, 100);
 
     obs_data_t *filterSettings = obs_data_create();
-    obs_data_set_double(filterSettings, "opacity", opacity);
+    obs_data_set_int(
+        filterSettings,
+        "opacity",
+        opacity);
 
     obs_source_t *filter =
         obs_source_get_filter_by_name(source, kOpacityFilterName);
