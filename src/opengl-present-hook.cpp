@@ -90,6 +90,12 @@ WglSwapLayerBuffersFn g_realWglSwapLayerBuffers = nullptr;
 
 HANDLE g_sharedMapping = nullptr;
 OpenGlPresentShared *g_shared = nullptr;
+HANDLE g_frameMapping = nullptr;
+HudFrameShared *g_frameShared = nullptr;
+LONG g_lastFrameSequence = -1;
+bool g_usingSharedHudFrame = false;
+std::vector<std::uint8_t> g_sharedFrameScratch(
+    static_cast<size_t>(kHudFrameBytes));
 thread_local LONG g_swapDepth = 0;
 
 void SetHookState(LONG state, LONG mask)
@@ -169,6 +175,23 @@ bool IsFullscreenWindow(HWND hwnd)
 constexpr int kHudWidth = 145;
 constexpr int kHudHeight = 50;
 constexpr int kHudMargin = 12;
+
+constexpr std::uint32_t kHudFrameMagic = 0x52464843; // CHFR
+constexpr std::uint32_t kHudFrameVersion = 1;
+constexpr int kHudFrameStride = kHudWidth * 4;
+constexpr int kHudFrameBytes = kHudFrameStride * kHudHeight;
+
+struct alignas(8) HudFrameShared {
+    std::uint32_t magic;
+    std::uint32_t version;
+    std::uint32_t pid;
+    std::uint32_t width;
+    std::uint32_t height;
+    std::uint32_t stride;
+    volatile LONG sequence;
+    volatile LONG activeIndex;
+    std::uint8_t pixels[2][kHudFrameBytes];
+};
 constexpr int kFpsPatchX = 22;
 constexpr int kFpsPatchY = 0;
 constexpr int kFpsPatchWidth = 53;
@@ -2653,6 +2676,127 @@ void UpdateLiveHudStatusTexture()
     SetDrawStage(DrawStageLiveStatusUploadDone);
 }
 
+
+bool UpdateSharedHudFrameTexture()
+{
+    if (!g_frameShared ||
+        !g_hudTexture) {
+        return false;
+    }
+
+    const LONG sequenceBefore =
+        InterlockedCompareExchange(
+            &g_frameShared->sequence,
+            0,
+            0);
+    if (sequenceBefore <= 0 ||
+        (sequenceBefore & 1) != 0) {
+        return g_usingSharedHudFrame;
+    }
+
+    if (sequenceBefore ==
+            g_lastFrameSequence &&
+        g_usingSharedHudFrame) {
+        return true;
+    }
+
+    const LONG activeIndex =
+        InterlockedCompareExchange(
+            &g_frameShared->activeIndex,
+            0,
+            0) &
+        1;
+
+    std::memcpy(
+        g_sharedFrameScratch.data(),
+        g_frameShared->pixels[activeIndex],
+        kHudFrameBytes);
+
+    MemoryBarrier();
+
+    const LONG sequenceAfter =
+        InterlockedCompareExchange(
+            &g_frameShared->sequence,
+            0,
+            0);
+    if (sequenceAfter != sequenceBefore ||
+        (sequenceAfter & 1) != 0) {
+        return g_usingSharedHudFrame;
+    }
+
+    GLint oldTexture = 0;
+    GLint oldUnpackAlignment = 4;
+    glGetIntegerv(
+        GL_TEXTURE_BINDING_2D,
+        &oldTexture);
+    glGetIntegerv(
+        GL_UNPACK_ALIGNMENT,
+        &oldUnpackAlignment);
+
+    glBindTexture(
+        GL_TEXTURE_2D,
+        g_hudTexture);
+    glPixelStorei(
+        GL_UNPACK_ALIGNMENT,
+        1);
+    glTexSubImage2D(
+        GL_TEXTURE_2D,
+        0,
+        0,
+        0,
+        kHudWidth,
+        kHudHeight,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        g_sharedFrameScratch.data());
+
+    glPixelStorei(
+        GL_UNPACK_ALIGNMENT,
+        oldUnpackAlignment);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        static_cast<GLuint>(oldTexture));
+
+    g_lastFrameSequence =
+        sequenceAfter;
+    g_usingSharedHudFrame =
+        true;
+    return true;
+}
+
+void AcknowledgeSharedHudState()
+{
+    if (!g_shared)
+        return;
+
+    const LONG timer =
+        InterlockedCompareExchange(
+            &g_shared->liveSessionSeconds,
+            0,
+            0);
+    InterlockedExchange(
+        &g_shared->liveSessionSecondsAck,
+        timer);
+
+    const LONG audio =
+        InterlockedCompareExchange(
+            &g_shared->liveAudioLevels,
+            0,
+            0);
+    InterlockedExchange(
+        &g_shared->liveAudioLevelsAck,
+        audio);
+
+    const LONG status =
+        InterlockedCompareExchange(
+            &g_shared->liveHudStatus,
+            0,
+            0);
+    InterlockedExchange(
+        &g_shared->liveHudStatusAck,
+        status);
+}
+
 bool EnsureModernHudRenderer()
 {
     const HGLRC context = wglGetCurrentContext();
@@ -2674,6 +2818,8 @@ bool EnsureModernHudRenderer()
     g_hudVao = 0;
     g_hudVbo = 0;
     g_hudSampler = -1;
+    g_lastFrameSequence = -1;
+    g_usingSharedHudFrame = false;
 
     if (!LoadModernGl() ||
         !CreateHudProgram() ||
@@ -2797,11 +2943,18 @@ void DrawStaticHud(HDC dc)
 
     SetDrawStage(DrawStageRendererReady);
     InterlockedExchange(&g_shared->renderMode, 1);
-    UpdateLiveFpsTexture();
-    UpdateLiveObsFpsTexture();
-    UpdateLiveSessionTimerTexture();
-    UpdateLiveAudioMetersTexture();
-    UpdateLiveHudStatusTexture();
+
+    const bool sharedHudReady =
+        UpdateSharedHudFrameTexture();
+    if (sharedHudReady) {
+        AcknowledgeSharedHudState();
+    } else {
+        UpdateLiveFpsTexture();
+        UpdateLiveObsFpsTexture();
+        UpdateLiveSessionTimerTexture();
+        UpdateLiveAudioMetersTexture();
+        UpdateLiveHudStatusTexture();
+    }
 
     GLint viewport[4] = {};
     glGetIntegerv(GL_VIEWPORT, viewport);
@@ -2944,9 +3097,11 @@ void DrawStaticHud(HDC dc)
     g_glUniform1i(g_hudSampler, 0);
     g_glUniform1f(
         g_hudOpacity,
-        static_cast<GLfloat>(
-            opacityPercent) /
-            100.0f);
+        g_usingSharedHudFrame
+            ? 1.0f
+            : static_cast<GLfloat>(
+                  opacityPercent) /
+                  100.0f);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     SetDrawStage(DrawStageDrawReturned);
 
@@ -3077,6 +3232,59 @@ bool CreateSharedState()
     return true;
 }
 
+
+bool CreateHudFrameState()
+{
+    wchar_t name[96] = {};
+    std::swprintf(
+        name,
+        sizeof(name) / sizeof(name[0]),
+        L"Local\\ClatashaHUD_FRAME_%lu",
+        GetCurrentProcessId());
+
+    g_frameMapping = CreateFileMappingW(
+        INVALID_HANDLE_VALUE,
+        nullptr,
+        PAGE_READWRITE,
+        0,
+        sizeof(HudFrameShared),
+        name);
+    if (!g_frameMapping)
+        return false;
+
+    g_frameShared =
+        static_cast<HudFrameShared *>(
+            MapViewOfFile(
+                g_frameMapping,
+                FILE_MAP_ALL_ACCESS,
+                0,
+                0,
+                sizeof(HudFrameShared)));
+    if (!g_frameShared) {
+        CloseHandle(g_frameMapping);
+        g_frameMapping = nullptr;
+        return false;
+    }
+
+    ZeroMemory(
+        g_frameShared,
+        sizeof(HudFrameShared));
+    g_frameShared->magic =
+        kHudFrameMagic;
+    g_frameShared->version =
+        kHudFrameVersion;
+    g_frameShared->pid =
+        GetCurrentProcessId();
+    g_frameShared->width =
+        kHudWidth;
+    g_frameShared->height =
+        kHudHeight;
+    g_frameShared->stride =
+        kHudFrameStride;
+
+    return true;
+}
+
 bool InstallPresentHooks()
 {
     HMODULE gdi = GetModuleHandleW(L"gdi32.dll");
@@ -3158,6 +3366,10 @@ DWORD WINAPI HookWorker(void *)
     if (!CreateSharedState())
         return 1;
 
+    // Best effort: the original cached renderer remains available as a
+    // fallback if the shared Qt frame mapping cannot be created.
+    CreateHudFrameState();
+
     // The helper only injects after opengl32.dll has been observed, but allow
     // a short grace period for renderer initialization races.
     for (int attempt = 0; attempt < 40; ++attempt) {
@@ -3188,6 +3400,16 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
         if (thread)
             CloseHandle(thread);
     } else if (reason == DLL_PROCESS_DETACH) {
+        if (g_frameShared) {
+            UnmapViewOfFile(
+                g_frameShared);
+            g_frameShared = nullptr;
+        }
+        if (g_frameMapping) {
+            CloseHandle(
+                g_frameMapping);
+            g_frameMapping = nullptr;
+        }
         if (g_shared) {
             UnmapViewOfFile(g_shared);
             g_shared = nullptr;
