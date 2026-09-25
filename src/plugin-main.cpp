@@ -3252,6 +3252,8 @@ static void show_settings()
 
     const int originalOpacity = g_hud->opacityPercent();
     const QString originalLocation = g_hud->location();
+    const bool originalRecordingWarnings =
+        g_hud->recordingVisibilityWarningsEnabled();
     const auto originalOverlayConfigs = loadOverlayConfigs();
     auto overlayConfigs = originalOverlayConfigs;
 
@@ -3300,12 +3302,25 @@ static void show_settings()
     const int currentLocation = locationBox->findData(originalLocation);
     locationBox->setCurrentIndex(currentLocation >= 0 ? currentLocation : 0);
 
+    auto *recordingWarnings = new QCheckBox(
+        QStringLiteral(
+            "Show recording visibility warning"),
+        hudTab);
+    recordingWarnings->setChecked(
+        originalRecordingWarnings);
+    recordingWarnings->setToolTip(
+        QStringLiteral(
+            "Shows a 3-second green or red strip when Clatasha switches between the capture-excluded normal HUD and the recorded fullscreen HUD."));
+
     auto *hudCard = new QGroupBox(QStringLiteral("HUD"), hudTab);
     auto *hudForm = new QFormLayout(hudCard);
     hudForm->setContentsMargins(18, 22, 18, 18);
     hudForm->setSpacing(12);
     hudForm->addRow(QStringLiteral("Opacity"), opacityRow);
     hudForm->addRow(QStringLiteral("HUD location"), locationBox);
+    hudForm->addRow(
+        QStringLiteral("Recording warning"),
+        recordingWarnings);
 
     auto *hudInfo = new QLabel(
         QStringLiteral("The desktop-audio meter now uses a small monitor icon and Mic/Aux uses a microphone icon."),
@@ -4215,6 +4230,8 @@ static void show_settings()
         }
 
         saveHudHotkeys();
+        g_hud->setRecordingVisibilityWarningsEnabled(
+            recordingWarnings->isChecked());
         g_hud->saveSettings();
         saveOverlayConfigs(overlayConfigs);
 #ifdef Q_OS_WIN
@@ -4343,6 +4360,8 @@ static void show_settings()
     if (dialog.exec() != QDialog::Accepted) {
         g_hud->setOpacityPercent(originalOpacity);
         g_hud->setLocation(originalLocation);
+        g_hud->setRecordingVisibilityWarningsEnabled(
+            originalRecordingWarnings);
         applyHudOverlays(originalOverlayConfigs);
     }
 }
