@@ -20,10 +20,15 @@ public:
 
     int opacityPercent() const { return opacityPercent_; }
     QString location() const { return location_; }
+    bool recordingVisibilityWarningsEnabled() const
+    {
+        return recordingVisibilityWarningsEnabled_;
+    }
     const QPixmap &logoPixmap() const { return logo_; }
 
     void setOpacityPercent(int value);
     void setLocation(const QString &location);
+    void setRecordingVisibilityWarningsEnabled(bool enabled);
     void positionHud();
     void saveSettings() const;
 
@@ -42,6 +47,9 @@ private:
     void stopFpsHelper();
     void readFpsState();
     void resetGameFps();
+    void updateHudRenderPathWarning(bool fullscreenHudActive);
+    void showRecordingVisibilityWarning(bool recorded);
+    int recordingVisibilityWarningHeight() const;
     QString fpsStateFilePath() const;
     QString recordingPath() const;
     QString diskSpaceText() const;
@@ -61,6 +69,7 @@ private:
     QTimer refreshTimer_;
     QElapsedTimer sessionTimer_;
     QElapsedTimer gameFpsClock_;
+    QElapsedTimer recordingWarningClock_;
     quintptr fpsHelperHandle_ = 0;
     bool fpsHelperStarted_ = false;
     int fpsHelperRestartAttempts_ = 0;
@@ -120,4 +129,9 @@ private:
     int audioRefreshTicks_ = 0;
     int opacityPercent_ = 50;
     QString location_ = QStringLiteral("top-right");
+    bool recordingVisibilityWarningsEnabled_ = true;
+    bool hudRenderPathKnown_ = false;
+    bool fullscreenHudActive_ = false;
+    bool recordingWarningRecorded_ = false;
+    qint64 recordingWarningStartMs_ = -1;
 };
