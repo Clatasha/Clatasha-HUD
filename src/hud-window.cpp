@@ -1,5 +1,4 @@
 #include "hud-window.hpp"
-#include "hud-telemetry.hpp"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -9,7 +8,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <cwchar>
 
 #include <QByteArray>
 
@@ -17,7 +15,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
-#include <QImage>
 #include <QPainter>
 #include <QPainterPath>
 #include <QScreen>
@@ -115,7 +112,6 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
     loadSettings();
     loadLogo();
     setWindowOpacity(1.0);
-    startHudTelemetry();
 
     gameFpsClock_.start();
     startFpsHelper();
@@ -140,7 +136,6 @@ ClatashaHudWindow::ClatashaHudWindow(QWidget *parent) : QWidget(parent)
 ClatashaHudWindow::~ClatashaHudWindow()
 {
     stopFpsHelper();
-    stopHudTelemetry();
 
     if (desktopMeter_) {
         obs_volmeter_remove_callback(desktopMeter_, desktopMeterUpdated, this);
@@ -210,190 +205,6 @@ void ClatashaHudWindow::loadLogo()
     blog(loaded ? LOG_INFO : LOG_ERROR,
          "[Clatasha HUD] Embedded logo %s",
          loaded ? "loaded" : "failed to load");
-}
-
-
-void ClatashaHudWindow::startHudTelemetry()
-{
-#ifdef Q_OS_WIN
-    if (hudTelemetryView_ != 0)
-        return;
-
-    HANDLE mapping = CreateFileMappingW(
-        INVALID_HANDLE_VALUE,
-        nullptr,
-        PAGE_READWRITE,
-        0,
-        sizeof(clatasha::HudTelemetryShared),
-        clatasha::kHudTelemetryMappingName);
-    if (!mapping) {
-        blog(LOG_WARNING,
-             "[Clatasha HUD] HUD telemetry mapping create failed: %lu",
-             GetLastError());
-        return;
-    }
-
-    auto *shared = static_cast<clatasha::HudTelemetryShared *>(
-        MapViewOfFile(
-            mapping,
-            FILE_MAP_ALL_ACCESS,
-            0,
-            0,
-            sizeof(clatasha::HudTelemetryShared)));
-    if (!shared) {
-        blog(LOG_WARNING,
-             "[Clatasha HUD] HUD telemetry mapping view failed: %lu",
-             GetLastError());
-        CloseHandle(mapping);
-        return;
-    }
-
-    ZeroMemory(shared, sizeof(*shared));
-    shared->magic = clatasha::kHudTelemetryMagic;
-    shared->version = clatasha::kHudTelemetryVersion;
-    shared->opacityPercent = opacityPercent_;
-    shared->location = clatasha::HudTopRight;
-
-    hudTelemetryMappingHandle_ =
-        reinterpret_cast<quintptr>(mapping);
-    hudTelemetryView_ =
-        reinterpret_cast<quintptr>(shared);
-
-    publishHudTelemetry();
-    blog(LOG_INFO, "[Clatasha HUD] Live HUD telemetry ready");
-#endif
-}
-
-void ClatashaHudWindow::stopHudTelemetry()
-{
-#ifdef Q_OS_WIN
-    if (hudTelemetryView_ != 0) {
-        auto *shared =
-            reinterpret_cast<clatasha::HudTelemetryShared *>(
-                hudTelemetryView_);
-        shared->magic = 0;
-        UnmapViewOfFile(shared);
-        hudTelemetryView_ = 0;
-    }
-
-    if (hudTelemetryMappingHandle_ != 0) {
-        CloseHandle(
-            reinterpret_cast<HANDLE>(
-                hudTelemetryMappingHandle_));
-        hudTelemetryMappingHandle_ = 0;
-    }
-#endif
-}
-
-void ClatashaHudWindow::publishHudTelemetry()
-{
-#ifdef Q_OS_WIN
-    if (hudTelemetryView_ == 0)
-        return;
-
-    auto *shared =
-        reinterpret_cast<clatasha::HudTelemetryShared *>(
-            hudTelemetryView_);
-    if (shared->magic != clatasha::kHudTelemetryMagic ||
-        shared->version != clatasha::kHudTelemetryVersion) {
-        return;
-    }
-
-    QImage hudImage(
-        clatasha::kHudPixelWidth,
-        clatasha::kHudPixelHeight,
-        QImage::Format_RGBA8888);
-    hudImage.fill(Qt::transparent);
-
-    {
-        QPainter imagePainter(&hudImage);
-        render(
-            &imagePainter,
-            QPoint(),
-            QRegion(),
-            QWidget::DrawWindowBackground);
-    }
-
-    auto *sequence =
-        reinterpret_cast<volatile LONG *>(
-            &shared->sequence);
-    InterlockedIncrement(sequence); // odd: writer active
-    MemoryBarrier();
-
-    shared->gameFpsValid = gameFpsValid_ ? 1 : 0;
-    shared->gameFps = gameFps_;
-    shared->obsFps = obsFps_;
-    shared->desktopLevel =
-        desktopLevel_.load(std::memory_order_relaxed);
-    shared->micLevel =
-        micLevel_.load(std::memory_order_relaxed);
-    shared->sessionActive =
-        (recordingActive_ || streamingActive_) ? 1 : 0;
-    shared->replayBufferActive =
-        replayBufferActive_ ? 1 : 0;
-    shared->opacityPercent = opacityPercent_;
-
-    if (location_ == QStringLiteral("top-left"))
-        shared->location = clatasha::HudTopLeft;
-    else if (location_ == QStringLiteral("bottom-left"))
-        shared->location = clatasha::HudBottomLeft;
-    else if (location_ == QStringLiteral("bottom-right"))
-        shared->location = clatasha::HudBottomRight;
-    else
-        shared->location = clatasha::HudTopRight;
-
-    shared->elapsedMs =
-        ((recordingActive_ || streamingActive_) &&
-         sessionTimer_.isValid())
-            ? sessionTimer_.elapsed()
-            : 0;
-
-    const std::wstring disk =
-        diskText_.toStdWString();
-    std::wmemset(
-        shared->diskText,
-        0,
-        sizeof(shared->diskText) /
-            sizeof(shared->diskText[0]));
-    const size_t diskCapacity =
-        sizeof(shared->diskText) /
-        sizeof(shared->diskText[0]);
-    const size_t copyCount =
-        std::min(
-            disk.size(),
-            diskCapacity > 0
-                ? diskCapacity - 1
-                : size_t{0});
-    if (copyCount > 0) {
-        std::wmemcpy(
-            shared->diskText,
-            disk.c_str(),
-            copyCount);
-    }
-
-    shared->pixelWidth = clatasha::kHudPixelWidth;
-    shared->pixelHeight = clatasha::kHudPixelHeight;
-    shared->pixelBytes = clatasha::kHudPixelBytes;
-
-    if (hudImage.bytesPerLine() ==
-        clatasha::kHudPixelWidth * 4) {
-        std::memcpy(
-            shared->rgba,
-            hudImage.constBits(),
-            clatasha::kHudPixelBytes);
-    } else {
-        for (int y = 0; y < clatasha::kHudPixelHeight; ++y) {
-            std::memcpy(
-                shared->rgba +
-                    y * clatasha::kHudPixelWidth * 4,
-                hudImage.constScanLine(y),
-                clatasha::kHudPixelWidth * 4);
-        }
-    }
-
-    MemoryBarrier();
-    InterlockedIncrement(sequence); // even: stable snapshot
-#endif
 }
 
 
@@ -721,7 +532,6 @@ void ClatashaHudWindow::readFpsState()
 void ClatashaHudWindow::setOpacityPercent(int value)
 {
     opacityPercent_ = qBound(10, value, 100);
-    publishHudTelemetry();
     update();
 }
 
@@ -735,7 +545,6 @@ void ClatashaHudWindow::setLocation(const QString &location)
     };
 
     location_ = valid.contains(location) ? location : QStringLiteral("top-right");
-    publishHudTelemetry();
     positionHud();
 }
 
@@ -976,7 +785,6 @@ void ClatashaHudWindow::refresh()
         diskText_ = diskSpaceText();
     }
 
-    publishHudTelemetry();
     update();
 }
 
