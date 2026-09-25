@@ -17,6 +17,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QImage>
 #include <QPainter>
 #include <QPainterPath>
 #include <QScreen>
@@ -62,6 +63,23 @@ struct alignas(8) OpenGlPresentSharedTransport {
     volatile LONG liveAudioLevelsAck;
     volatile LONG liveHudStatus;
     volatile LONG liveHudStatusAck;
+};
+
+constexpr std::uint32_t kHudFrameMagic = 0x52464843; // CHFR
+constexpr std::uint32_t kHudFrameVersion = 1;
+constexpr int kHudFrameStride = kHudWidth * 4;
+constexpr int kHudFrameBytes = kHudFrameStride * kHudHeight;
+
+struct alignas(8) HudFrameShared {
+    std::uint32_t magic;
+    std::uint32_t version;
+    std::uint32_t pid;
+    std::uint32_t width;
+    std::uint32_t height;
+    std::uint32_t stride;
+    volatile LONG sequence;
+    volatile LONG activeIndex;
+    std::uint8_t pixels[2][kHudFrameBytes];
 };
 
 void PublishOpenGlLiveState(quint32 pid,
@@ -195,6 +213,93 @@ void PublishOpenGlLiveState(quint32 pid,
         InterlockedExchange(
             &shared->liveHudStatus,
             static_cast<LONG>(packedStatus));
+    }
+
+    UnmapViewOfFile(shared);
+    CloseHandle(mapping);
+}
+
+void PublishHudFrame(quint32 pid, QWidget *widget)
+{
+    if (pid == 0 || !widget)
+        return;
+
+    wchar_t name[96] = {};
+    swprintf_s(name, L"Local\\ClatashaHUD_FRAME_%u", pid);
+
+    HANDLE mapping = OpenFileMappingW(
+        FILE_MAP_READ | FILE_MAP_WRITE,
+        FALSE,
+        name);
+    if (!mapping)
+        return;
+
+    auto *shared =
+        static_cast<HudFrameShared *>(
+            MapViewOfFile(
+                mapping,
+                FILE_MAP_READ | FILE_MAP_WRITE,
+                0,
+                0,
+                sizeof(HudFrameShared)));
+    if (!shared) {
+        CloseHandle(mapping);
+        return;
+    }
+
+    if (shared->magic == kHudFrameMagic &&
+        shared->version == kHudFrameVersion &&
+        shared->pid == pid &&
+        shared->width == kHudWidth &&
+        shared->height == kHudHeight &&
+        shared->stride == kHudFrameStride) {
+        QImage frame(
+            kHudWidth,
+            kHudHeight,
+            QImage::Format_RGBA8888);
+        frame.fill(Qt::transparent);
+
+        QPainter painter(&frame);
+        widget->render(
+            &painter,
+            QPoint(),
+            QRegion(),
+            QWidget::DrawWindowBackground |
+                QWidget::DrawChildren);
+        painter.end();
+
+        LONG begin =
+            InterlockedIncrement(&shared->sequence);
+        if ((begin & 1) == 0)
+            begin = InterlockedIncrement(&shared->sequence);
+
+        const LONG current =
+            InterlockedCompareExchange(
+                &shared->activeIndex,
+                0,
+                0) &
+            1;
+        const LONG next = current ^ 1;
+
+        for (int y = 0; y < kHudHeight; ++y) {
+            std::memcpy(
+                shared->pixels[next] +
+                    static_cast<size_t>(y) *
+                        kHudFrameStride,
+                frame.constScanLine(y),
+                kHudFrameStride);
+        }
+
+        MemoryBarrier();
+        InterlockedExchange(
+            &shared->activeIndex,
+            next);
+        MemoryBarrier();
+
+        LONG end =
+            InterlockedIncrement(&shared->sequence);
+        if ((end & 1) != 0)
+            InterlockedIncrement(&shared->sequence);
     }
 
     UnmapViewOfFile(shared);
@@ -1081,6 +1186,9 @@ void ClatashaHudWindow::refresh()
         streamingActive_,
         replayBufferActive_,
         opacityPercent_);
+    PublishHudFrame(
+        trackedGamePid_,
+        this);
 #endif
 
     if (++fpsStateRefreshTicks_ >= 2) {
