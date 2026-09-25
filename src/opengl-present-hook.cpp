@@ -10,6 +10,7 @@
 #define APIENTRYP APIENTRY *
 #endif
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cwchar>
@@ -32,6 +33,8 @@ enum DrawStage : LONG {
     DrawStageRendererEntry = 11,
     DrawStageFallbackEntry = 15,
     DrawStageRendererReady = 20,
+    DrawStageLiveFpsUploadEntry = 21,
+    DrawStageLiveFpsUploadDone = 22,
     DrawStageViewportReady = 30,
     DrawStageStateCaptured = 40,
     DrawStageOverlayStateApplied = 50,
@@ -147,10 +150,17 @@ bool IsFullscreenWindow(HWND hwnd)
 constexpr int kHudWidth = 145;
 constexpr int kHudHeight = 50;
 constexpr int kHudMargin = 12;
+constexpr int kFpsPatchX = 22;
+constexpr int kFpsPatchY = 0;
+constexpr int kFpsPatchWidth = 53;
+constexpr int kFpsPatchHeight = 34;
+constexpr int kMaxCachedFps = 999;
 
 GLuint g_hudTexture = 0;
 HGLRC g_hudTextureContext = nullptr;
 std::vector<std::uint8_t> g_hudPixels;
+std::vector<std::vector<std::uint8_t>> g_liveFpsPatches;
+LONG g_lastRenderedLiveFps = -1;
 
 bool ShouldDrawOverlay(HDC dc)
 {
@@ -257,11 +267,9 @@ bool BuildStaticHudPixels()
     HFONT oldFont =
         static_cast<HFONT>(SelectObject(dc, fpsFont));
     SetTextColor(dc, RGB(45, 143, 255));
-    RECT fpsRect{22, -2, 75, 34};
-    DrawTextW(
-        dc, L"60", -1, &fpsRect,
-        DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
+    // Leave the FPS rectangle clean in the base texture. Live FPS patches are
+    // pre-rendered below during this same one-time setup and uploaded later.
     SelectObject(dc, smallBold);
     SetTextColor(dc, RGB(165, 171, 176));
     RECT obsRect{74, 3, 103, 25};
@@ -359,6 +367,156 @@ bool BuildStaticHudPixels()
             }
         }
     }
+
+    // Pre-render 0..999 into tiny CPU-side RGBA patches. No GDI work happens
+    // during gameplay; the render thread only uploads one cached 53x34 patch
+    // when the received integer FPS changes.
+    HDC fpsDc = CreateCompatibleDC(nullptr);
+    if (!fpsDc) {
+        SelectObject(dc, oldFont);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        SelectObject(dc, oldBitmap);
+        DeleteObject(iconPen);
+        DeleteObject(dotBrush);
+        DeleteObject(logoBrush);
+        DeleteObject(badgePen);
+        DeleteObject(badgeBrush);
+        DeleteObject(tinyFont);
+        DeleteObject(smallBold);
+        DeleteObject(fpsFont);
+        DeleteObject(panelBrush);
+        DeleteObject(borderPen);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+        return false;
+    }
+
+    BITMAPINFO fpsInfo{};
+    fpsInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    fpsInfo.bmiHeader.biWidth = kFpsPatchWidth;
+    fpsInfo.bmiHeader.biHeight = -kFpsPatchHeight;
+    fpsInfo.bmiHeader.biPlanes = 1;
+    fpsInfo.bmiHeader.biBitCount = 32;
+    fpsInfo.bmiHeader.biCompression = BI_RGB;
+
+    void *fpsBits = nullptr;
+    HBITMAP fpsBitmap = CreateDIBSection(
+        fpsDc,
+        &fpsInfo,
+        DIB_RGB_COLORS,
+        &fpsBits,
+        nullptr,
+        0);
+    if (!fpsBitmap || !fpsBits) {
+        if (fpsBitmap)
+            DeleteObject(fpsBitmap);
+        DeleteDC(fpsDc);
+        SelectObject(dc, oldFont);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        SelectObject(dc, oldBitmap);
+        DeleteObject(iconPen);
+        DeleteObject(dotBrush);
+        DeleteObject(logoBrush);
+        DeleteObject(badgePen);
+        DeleteObject(badgeBrush);
+        DeleteObject(tinyFont);
+        DeleteObject(smallBold);
+        DeleteObject(fpsFont);
+        DeleteObject(panelBrush);
+        DeleteObject(borderPen);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+        return false;
+    }
+
+    HGDIOBJ fpsOldBitmap = SelectObject(fpsDc, fpsBitmap);
+    HFONT fpsOldFont =
+        static_cast<HFONT>(SelectObject(fpsDc, fpsFont));
+    SetBkMode(fpsDc, TRANSPARENT);
+    SetTextColor(fpsDc, RGB(45, 143, 255));
+
+    std::vector<std::uint8_t> baseFpsPatch(
+        static_cast<size_t>(kFpsPatchWidth) *
+        static_cast<size_t>(kFpsPatchHeight) * 4);
+
+    for (int y = 0; y < kFpsPatchHeight; ++y) {
+        for (int x = 0; x < kFpsPatchWidth; ++x) {
+            const size_t srcIndex =
+                (static_cast<size_t>(y + kFpsPatchY) * kHudWidth +
+                 static_cast<size_t>(x + kFpsPatchX)) * 4;
+            const size_t dstIndex =
+                (static_cast<size_t>(y) * kFpsPatchWidth +
+                 static_cast<size_t>(x)) * 4;
+            baseFpsPatch[dstIndex + 0] = g_hudPixels[srcIndex + 0];
+            baseFpsPatch[dstIndex + 1] = g_hudPixels[srcIndex + 1];
+            baseFpsPatch[dstIndex + 2] = g_hudPixels[srcIndex + 2];
+            baseFpsPatch[dstIndex + 3] = g_hudPixels[srcIndex + 3];
+        }
+    }
+
+    g_liveFpsPatches.clear();
+    g_liveFpsPatches.resize(kMaxCachedFps + 1);
+
+    auto *fpsSource =
+        static_cast<std::uint8_t *>(fpsBits);
+
+    for (int fpsValue = 0; fpsValue <= kMaxCachedFps; ++fpsValue) {
+        for (int y = 0; y < kFpsPatchHeight; ++y) {
+            for (int x = 0; x < kFpsPatchWidth; ++x) {
+                const size_t index =
+                    (static_cast<size_t>(y) * kFpsPatchWidth +
+                     static_cast<size_t>(x)) * 4;
+                fpsSource[index + 0] = baseFpsPatch[index + 2];
+                fpsSource[index + 1] = baseFpsPatch[index + 1];
+                fpsSource[index + 2] = baseFpsPatch[index + 0];
+                fpsSource[index + 3] = baseFpsPatch[index + 3];
+            }
+        }
+
+        wchar_t fpsText[16] = {};
+        swprintf_s(fpsText, L"%d", fpsValue);
+        RECT localFpsRect{0, -2, kFpsPatchWidth, kFpsPatchHeight};
+        DrawTextW(
+            fpsDc,
+            fpsText,
+            -1,
+            &localFpsRect,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+        auto &patch = g_liveFpsPatches[fpsValue];
+        patch.resize(
+            static_cast<size_t>(kFpsPatchWidth) *
+            static_cast<size_t>(kFpsPatchHeight) * 4);
+
+        for (int y = 0; y < kFpsPatchHeight; ++y) {
+            for (int x = 0; x < kFpsPatchWidth; ++x) {
+                const size_t index =
+                    (static_cast<size_t>(y) * kFpsPatchWidth +
+                     static_cast<size_t>(x)) * 4;
+                const std::uint8_t b = fpsSource[index + 0];
+                const std::uint8_t g = fpsSource[index + 1];
+                const std::uint8_t r = fpsSource[index + 2];
+
+                patch[index + 0] = r;
+                patch[index + 1] = g;
+                patch[index + 2] = b;
+
+                const bool changed =
+                    r != baseFpsPatch[index + 0] ||
+                    g != baseFpsPatch[index + 1] ||
+                    b != baseFpsPatch[index + 2];
+                patch[index + 3] =
+                    changed ? 255 : baseFpsPatch[index + 3];
+            }
+        }
+    }
+
+    SelectObject(fpsDc, fpsOldFont);
+    SelectObject(fpsDc, fpsOldBitmap);
+    DeleteObject(fpsBitmap);
+    DeleteDC(fpsDc);
 
     SelectObject(dc, oldFont);
     SelectObject(dc, oldPen);
@@ -657,7 +815,64 @@ bool CreateHudTexture()
         GL_TEXTURE_2D,
         static_cast<GLuint>(oldTexture));
 
+    g_lastRenderedLiveFps = -1;
     return true;
+}
+
+void UpdateLiveFpsTexture()
+{
+    if (!g_shared ||
+        !g_hudTexture ||
+        g_liveFpsPatches.empty()) {
+        return;
+    }
+
+    const LONG receivedFps =
+        InterlockedCompareExchange(
+            &g_shared->liveFpsAck,
+            0,
+            0);
+    if (receivedFps <= 0)
+        return;
+
+    const LONG clampedFps =
+        std::clamp<LONG>(
+            receivedFps,
+            0,
+            kMaxCachedFps);
+    if (clampedFps == g_lastRenderedLiveFps)
+        return;
+
+    SetDrawStage(DrawStageLiveFpsUploadEntry);
+
+    GLint oldTexture = 0;
+    GLint oldUnpackAlignment = 4;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &oldUnpackAlignment);
+
+    glBindTexture(GL_TEXTURE_2D, g_hudTexture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(
+        GL_TEXTURE_2D,
+        0,
+        kFpsPatchX,
+        kFpsPatchY,
+        kFpsPatchWidth,
+        kFpsPatchHeight,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        g_liveFpsPatches[
+            static_cast<size_t>(clampedFps)].data());
+
+    glPixelStorei(
+        GL_UNPACK_ALIGNMENT,
+        oldUnpackAlignment);
+    glBindTexture(
+        GL_TEXTURE_2D,
+        static_cast<GLuint>(oldTexture));
+
+    g_lastRenderedLiveFps = clampedFps;
+    SetDrawStage(DrawStageLiveFpsUploadDone);
 }
 
 bool EnsureModernHudRenderer()
@@ -803,6 +1018,7 @@ void DrawStaticHud(HDC dc)
 
     SetDrawStage(DrawStageRendererReady);
     InterlockedExchange(&g_shared->renderMode, 1);
+    UpdateLiveFpsTexture();
 
     GLint viewport[4] = {};
     glGetIntegerv(GL_VIEWPORT, viewport);
