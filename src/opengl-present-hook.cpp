@@ -2805,31 +2805,53 @@ void DrawStaticHud(HDC dc)
 
     GLint viewport[4] = {};
     glGetIntegerv(GL_VIEWPORT, viewport);
-    if (viewport[2] < kHudWidth + kHudMargin * 2 ||
-        viewport[3] < kHudHeight + kHudMargin * 2) {
+
+    int drawWidth = viewport[2];
+    int drawHeight = viewport[3];
+
+    // Some OpenGL games leave a smaller scene/UI viewport active when
+    // SwapBuffers is reached. Anchor the HUD to the actual game client area
+    // instead of inheriting that temporary viewport, then restore it after
+    // drawing so the game's GL state remains unchanged.
+    const HWND renderWindow = WindowFromDC(dc);
+    RECT clientRect{};
+    if (renderWindow &&
+        GetClientRect(renderWindow, &clientRect)) {
+        const int clientWidth =
+            clientRect.right - clientRect.left;
+        const int clientHeight =
+            clientRect.bottom - clientRect.top;
+        if (clientWidth > 0 && clientHeight > 0) {
+            drawWidth = clientWidth;
+            drawHeight = clientHeight;
+        }
+    }
+
+    if (drawWidth < kHudWidth + kHudMargin * 2 ||
+        drawHeight < kHudHeight + kHudMargin * 2) {
         return;
     }
     SetDrawStage(DrawStageViewportReady);
 
     const GLfloat leftPx =
         static_cast<GLfloat>(
-            viewport[2] - kHudWidth - kHudMargin);
+            drawWidth - kHudWidth - kHudMargin);
     const GLfloat rightPx =
         leftPx + static_cast<GLfloat>(kHudWidth);
     const GLfloat topPx =
         static_cast<GLfloat>(
-            viewport[3] - kHudMargin);
+            drawHeight - kHudMargin);
     const GLfloat bottomPx =
         topPx - static_cast<GLfloat>(kHudHeight);
 
-    const auto ndcX = [viewport](GLfloat px) {
+    const auto ndcX = [drawWidth](GLfloat px) {
         return px * 2.0f /
-                   static_cast<GLfloat>(viewport[2]) -
+                   static_cast<GLfloat>(drawWidth) -
                1.0f;
     };
-    const auto ndcY = [viewport](GLfloat py) {
+    const auto ndcY = [drawHeight](GLfloat py) {
         return py * 2.0f /
-                   static_cast<GLfloat>(viewport[3]) -
+                   static_cast<GLfloat>(drawHeight) -
                1.0f;
     };
 
@@ -2880,6 +2902,7 @@ void DrawStaticHud(HDC dc)
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTexture0);
     SetDrawStage(DrawStageStateCaptured);
 
+    glViewport(0, 0, drawWidth, drawHeight);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_SCISSOR_TEST);
@@ -2957,6 +2980,12 @@ void DrawStaticHud(HDC dc)
         glEnable(GL_SCISSOR_TEST);
     if (stencilWasEnabled)
         glEnable(GL_STENCIL_TEST);
+
+    glViewport(
+        viewport[0],
+        viewport[1],
+        viewport[2],
+        viewport[3]);
     SetDrawStage(DrawStageStateRestored);
 
     InterlockedIncrement64(&g_shared->drawCount);
