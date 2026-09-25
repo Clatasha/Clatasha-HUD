@@ -174,6 +174,7 @@ GameBorderlessState g_gameBorderless;
 HWND g_lastExternalForegroundWindow = nullptr;
 bool g_keepGameBorderlessApplied = true;
 bool g_taskbarAutoHideChangedByClatasha = false;
+bool g_displayCaptureForcedBorderless = false;
 
 HWINEVENTHOOK g_topmostForegroundHook = nullptr;
 HWINEVENTHOOK g_topmostShowHook = nullptr;
@@ -2688,6 +2689,30 @@ void updateDisplayCaptureSafeMode()
             ResetEvent(g_displayCaptureSafeEvent);
     }
 
+    // Display Capture cannot hide HUD pixels that are injected into the game
+    // framebuffer. In safe mode we use the separate capture-excluded HUD
+    // window instead, so true fullscreen needs to be converted to Clatasha's
+    // composited borderless mode for that window to remain visible locally.
+    if (active) {
+        if (!g_gameBorderless.active &&
+            g_lastExternalForegroundWindow &&
+            IsWindow(g_lastExternalForegroundWindow)) {
+            if (forceGameBorderless(
+                    g_lastExternalForegroundWindow)) {
+                g_displayCaptureForcedBorderless = true;
+                blog(
+                    LOG_INFO,
+                    "[Clatasha HUD] Display Capture Safe Mode switched game to borderless fullscreen");
+            }
+        }
+    } else if (g_displayCaptureForcedBorderless) {
+        restoreGameBorderlessWindow();
+        g_displayCaptureForcedBorderless = false;
+        blog(
+            LOG_INFO,
+            "[Clatasha HUD] Display Capture Safe Mode restored original game window mode");
+    }
+
     if (active ==
         g_displayCaptureSafeActive) {
         return;
@@ -2700,7 +2725,7 @@ void updateDisplayCaptureSafeMode()
         "[Clatasha HUD] Display Capture Safe Mode: %s%s",
         active ? "active" : "inactive",
         active
-            ? " (injected HUD drawing suppressed)"
+            ? " (local HUD visible, injected drawing suppressed)"
             : "");
 }
 #else
@@ -4279,6 +4304,7 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+    g_displayCaptureForcedBorderless = false;
     restoreGameBorderlessWindow();
 #ifdef Q_OS_WIN
     if (g_displayCaptureSafeEvent) {
