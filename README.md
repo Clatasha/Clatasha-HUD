@@ -153,3 +153,7 @@ Third-party browser widgets still connect to their own service through OBS Brows
 ## Project status
 
 Clatasha HUD is in active development. The core HUD, DXGI game-FPS backend, browser overlay manager, transparent alert rendering, direct-image handling, and local-file support are functional, but the project is still being refined through real OBS/game testing.
+
+## Copyright and third-party software
+
+Copyright © 2011–2026 Clatasha. All rights reserved.
