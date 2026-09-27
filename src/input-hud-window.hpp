@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include <QRectF>
 #include <QString>
 #include <QTimer>
 #include <QVector>
