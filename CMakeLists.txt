@@ -37,6 +37,8 @@ target_sources(
     src/plugin-main.cpp
     src/hud-window.cpp
     src/hud-window.hpp
+    src/input-hud-window.cpp
+    src/input-hud-window.hpp
     resources.qrc
 )
 
