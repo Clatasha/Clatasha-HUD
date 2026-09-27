@@ -76,11 +76,13 @@
 #endif
 
 #include "hud-window.hpp"
+#include "input-hud-window.hpp"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("clatasha-hud", "en-US")
 
 static ClatashaHudWindow *g_hud = nullptr;
+static ClatashaInputHudWindow *g_inputHud = nullptr;
 static QAction *g_toolsAction = nullptr;
 static QAction *g_settingsAction = nullptr;
 static QTimer *g_hudWatchdog = nullptr;
@@ -695,6 +697,29 @@ void reassertClatashaTopmostWindows()
         }
     }
 
+    if (g_inputHud &&
+        g_inputHud->enabled() &&
+        g_inputHud->isVisible()) {
+        const HWND inputHwnd =
+            reinterpret_cast<HWND>(
+                g_inputHud->winId());
+        if (inputHwnd &&
+            IsWindow(inputHwnd)) {
+            SetWindowPos(
+                inputHwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE |
+                    SWP_NOSIZE |
+                    SWP_NOACTIVATE |
+                    SWP_NOOWNERZORDER |
+                    SWP_SHOWWINDOW);
+        }
+    }
+
     if (g_browserHudOverlaysWantedVisible) {
         for (BrowserHudOverlay *overlay : g_hudBrowserOverlays) {
             if (overlay)
@@ -704,6 +729,12 @@ void reassertClatashaTopmostWindows()
 #else
     if (g_hud && g_hudWantedVisible && g_hud->isVisible())
         g_hud->raise();
+
+    if (g_inputHud &&
+        g_inputHud->enabled() &&
+        g_inputHud->isVisible()) {
+        g_inputHud->raise();
+    }
 
     if (g_browserHudOverlaysWantedVisible) {
         for (BrowserHudOverlay *overlay : g_hudBrowserOverlays) {
@@ -2843,6 +2874,10 @@ static void ensure_hud()
 
     g_hud = new ClatashaHudWindow();
 
+    if (!g_inputHud)
+        g_inputHud =
+            new ClatashaInputHudWindow();
+
     g_hudWatchdog = new QTimer(g_hud);
     g_hudWatchdog->setInterval(250);
     QObject::connect(g_hudWatchdog, &QTimer::timeout, []() {
@@ -2876,6 +2911,13 @@ static void ensure_hud()
             }
         }
 #endif
+
+        if (g_inputHud &&
+            g_inputHud->enabled() &&
+            !g_inputHud->isVisible()) {
+            g_inputHud->show();
+            g_inputHud->positionHud();
+        }
 
         reassertClatashaTopmostWindows();
 
