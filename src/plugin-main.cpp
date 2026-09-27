@@ -4639,6 +4639,14 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
         shutdownUpdateChecker();
         g_hudWantedVisible = false;
         destroyHudOverlays();
+
+        if (g_inputHud) {
+            g_inputHud->saveSettings();
+            g_inputHud->close();
+            delete g_inputHud;
+            g_inputHud = nullptr;
+        }
+
         if (g_hud) {
             g_hud->saveSettings();
             g_hud->close();
@@ -4718,6 +4726,13 @@ void obs_module_unload(void)
     if (!g_frontendExiting)
         obs_frontend_remove_event_callback(on_frontend_event, nullptr);
     destroyHudOverlays();
+
+    if (g_inputHud) {
+        g_inputHud->saveSettings();
+        g_inputHud->close();
+        delete g_inputHud;
+        g_inputHud = nullptr;
+    }
 
     if (g_toolsAction) {
         QObject::disconnect(g_toolsAction, nullptr, nullptr, nullptr);
