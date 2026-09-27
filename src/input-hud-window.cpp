@@ -8,6 +8,10 @@
 #include <QPainterPath>
 #include <QScreen>
 #include <QSettings>
+#include <QDir>
+#include <QFileInfo>
+
+#include <obs-module.h>
 
 #include <algorithm>
 
@@ -105,14 +109,29 @@ ClatashaInputHudWindow::~ClatashaInputHudWindow()
 
 QString ClatashaInputHudWindow::settingsFilePath() const
 {
-    return QCoreApplication::applicationDirPath() +
-           QStringLiteral("/clatasha-hud.ini");
+    char *path =
+        obs_module_config_path(
+            "settings.ini");
+    if (!path)
+        return {};
+
+    const QString result =
+        QString::fromUtf8(path);
+    bfree(path);
+    return result;
 }
 
 void ClatashaInputHudWindow::loadSettings()
 {
+    const QString path =
+        settingsFilePath();
+    if (path.isEmpty())
+        return;
+
+    QDir().mkpath(
+        QFileInfo(path).absolutePath());
     QSettings settings(
-        settingsFilePath(),
+        path,
         QSettings::IniFormat);
 
     enabled_ =
@@ -140,8 +159,15 @@ void ClatashaInputHudWindow::loadSettings()
 
 void ClatashaInputHudWindow::saveSettings() const
 {
+    const QString path =
+        settingsFilePath();
+    if (path.isEmpty())
+        return;
+
+    QDir().mkpath(
+        QFileInfo(path).absolutePath());
     QSettings settings(
-        settingsFilePath(),
+        path,
         QSettings::IniFormat);
     settings.setValue(
         QStringLiteral("inputHud/enabled"),
