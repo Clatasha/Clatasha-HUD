@@ -3296,6 +3296,18 @@ static void show_settings()
     const QString originalLocation = g_hud->location();
     const bool originalRecordingWarnings =
         g_hud->recordingVisibilityWarningsEnabled();
+
+    const bool originalInputHudEnabled =
+        g_inputHud && g_inputHud->enabled();
+    const int originalInputHudOpacity =
+        g_inputHud
+            ? g_inputHud->opacityPercent()
+            : 92;
+    const int originalInputHudScale =
+        g_inputHud
+            ? g_inputHud->scalePercent()
+            : 100;
+
     const auto originalOverlayConfigs = loadOverlayConfigs();
     auto overlayConfigs = originalOverlayConfigs;
 
@@ -3799,7 +3811,170 @@ static void show_settings()
     advancedLayout->addWidget(advancedTitle);
     advancedLayout->addWidget(advancedSubtitle);
     advancedLayout->addWidget(gameWindowCard);
+
+    auto *inputHudCard =
+        new QGroupBox(
+            QStringLiteral("Input HUD"),
+            advancedPage);
+    auto *inputHudLayout =
+        new QFormLayout(inputHudCard);
+    inputHudLayout->setContentsMargins(
+        14,
+        20,
+        14,
+        14);
+    inputHudLayout->setSpacing(10);
+
+    auto *inputHudEnabled =
+        new QCheckBox(
+            QStringLiteral("Enable Input HUD"),
+            inputHudCard);
+    inputHudEnabled->setChecked(
+        originalInputHudEnabled);
+
+    auto *inputPreset =
+        new QComboBox(inputHudCard);
+    inputPreset->addItem(
+        QStringLiteral("FPS Default"));
+    inputPreset->setEnabled(false);
+
+    auto *inputOutput =
+        new QComboBox(inputHudCard);
+    inputOutput->addItem(
+        QStringLiteral("HUD (local only)"));
+    inputOutput->addItem(
+        QStringLiteral("VIDEO — coming next iteration"));
+    inputOutput->addItem(
+        QStringLiteral("HUD / VIDEO — coming next iteration"));
+    inputOutput->setCurrentIndex(0);
+    inputOutput->setEnabled(false);
+
+    auto *inputScale =
+        new QSlider(
+            Qt::Horizontal,
+            inputHudCard);
+    inputScale->setRange(60, 160);
+    inputScale->setValue(
+        originalInputHudScale);
+    auto *inputScaleValue =
+        new QLabel(
+            QStringLiteral("%1%")
+                .arg(originalInputHudScale),
+            inputHudCard);
+    inputScaleValue->setMinimumWidth(42);
+
+    auto *inputScaleRow =
+        new QWidget(inputHudCard);
+    auto *inputScaleRowLayout =
+        new QHBoxLayout(inputScaleRow);
+    inputScaleRowLayout->setContentsMargins(
+        0,
+        0,
+        0,
+        0);
+    inputScaleRowLayout->addWidget(
+        inputScale,
+        1);
+    inputScaleRowLayout->addWidget(
+        inputScaleValue);
+
+    auto *inputOpacity =
+        new QSlider(
+            Qt::Horizontal,
+            inputHudCard);
+    inputOpacity->setRange(20, 100);
+    inputOpacity->setValue(
+        originalInputHudOpacity);
+    auto *inputOpacityValue =
+        new QLabel(
+            QStringLiteral("%1%")
+                .arg(originalInputHudOpacity),
+            inputHudCard);
+    inputOpacityValue->setMinimumWidth(42);
+
+    auto *inputOpacityRow =
+        new QWidget(inputHudCard);
+    auto *inputOpacityRowLayout =
+        new QHBoxLayout(inputOpacityRow);
+    inputOpacityRowLayout->setContentsMargins(
+        0,
+        0,
+        0,
+        0);
+    inputOpacityRowLayout->addWidget(
+        inputOpacity,
+        1);
+    inputOpacityRowLayout->addWidget(
+        inputOpacityValue);
+
+    auto *inputHudNote =
+        new QLabel(
+            QStringLiteral(
+                "First working Input HUD build. Uses the FPS preset from the reference: Esc, F1, ~, 1–4, Tab, QWER, Caps, ASDFG, Shift, ZXCV, Ctrl, Alt and Space, plus left/right/middle click, wheel and two side buttons. It starts at the bottom-left and is excluded from Windows display capture."),
+            inputHudCard);
+    inputHudNote->setWordWrap(true);
+    inputHudNote->setProperty(
+        "accentNote",
+        true);
+
+    inputHudLayout->addRow(
+        inputHudEnabled);
+    inputHudLayout->addRow(
+        QStringLiteral("Preset"),
+        inputPreset);
+    inputHudLayout->addRow(
+        QStringLiteral("Output"),
+        inputOutput);
+    inputHudLayout->addRow(
+        QStringLiteral("Scale"),
+        inputScaleRow);
+    inputHudLayout->addRow(
+        QStringLiteral("Opacity"),
+        inputOpacityRow);
+    inputHudLayout->addRow(
+        inputHudNote);
+
+    advancedLayout->addWidget(
+        inputHudCard);
     advancedLayout->addStretch();
+
+    QObject::connect(
+        inputScale,
+        &QSlider::valueChanged,
+        &dialog,
+        [=](int value) {
+            inputScaleValue->setText(
+                QStringLiteral("%1%")
+                    .arg(value));
+            if (g_inputHud) {
+                g_inputHud->setScalePercent(
+                    value);
+            }
+        });
+
+    QObject::connect(
+        inputOpacity,
+        &QSlider::valueChanged,
+        &dialog,
+        [=](int value) {
+            inputOpacityValue->setText(
+                QStringLiteral("%1%")
+                    .arg(value));
+            if (g_inputHud) {
+                g_inputHud->setOpacityPercent(
+                    value);
+            }
+        });
+
+    QObject::connect(
+        inputHudEnabled,
+        &QCheckBox::toggled,
+        &dialog,
+        [](bool checked) {
+            if (g_inputHud)
+                g_inputHud->setEnabled(
+                    checked);
+        });
 
 #ifdef Q_OS_WIN
     auto refreshGameWindowUi = [=]() {
@@ -4275,6 +4450,17 @@ static void show_settings()
         g_hud->setRecordingVisibilityWarningsEnabled(
             recordingWarnings->isChecked());
         g_hud->saveSettings();
+
+        if (g_inputHud) {
+            g_inputHud->setEnabled(
+                inputHudEnabled->isChecked());
+            g_inputHud->setScalePercent(
+                inputScale->value());
+            g_inputHud->setOpacityPercent(
+                inputOpacity->value());
+            g_inputHud->saveSettings();
+        }
+
         saveOverlayConfigs(overlayConfigs);
 #ifdef Q_OS_WIN
         g_keepGameBorderlessApplied =
@@ -4404,6 +4590,16 @@ static void show_settings()
         g_hud->setLocation(originalLocation);
         g_hud->setRecordingVisibilityWarningsEnabled(
             originalRecordingWarnings);
+
+        if (g_inputHud) {
+            g_inputHud->setEnabled(
+                originalInputHudEnabled);
+            g_inputHud->setScalePercent(
+                originalInputHudScale);
+            g_inputHud->setOpacityPercent(
+                originalInputHudOpacity);
+        }
+
         applyHudOverlays(originalOverlayConfigs);
     }
 }
