@@ -60,10 +60,19 @@ ClatashaInputHudWindow::ClatashaInputHudWindow(QWidget *parent)
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
 
     hookInstance_ = this;
+
+    HMODULE inputHudModule = nullptr;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(
+            &ClatashaInputHudWindow::mouseHookProc),
+        &inputHudModule);
+
     mouseHook_ = SetWindowsHookExW(
         WH_MOUSE_LL,
         &ClatashaInputHudWindow::mouseHookProc,
-        GetModuleHandleW(nullptr),
+        inputHudModule,
         0);
 #endif
 
