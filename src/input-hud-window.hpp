@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include <QImage>
+#include <QMutex>
 #include <QRectF>
 #include <QString>
 #include <QStringList>
@@ -43,6 +45,8 @@ public:
     int scalePercent() const { return scalePercent_; }
     QStringList selectedKeyIds() const { return selectedKeyIds_; }
     quint32 mouseControls() const { return mouseControls_; }
+    int outputMode() const { return outputMode_; }
+    QImage latestFrame() const;
 
     static QStringList fpsDefaultKeyIds();
 
@@ -51,6 +55,7 @@ public:
     void setScalePercent(int value);
     void setSelectedKeyIds(const QStringList &ids);
     void setMouseControls(quint32 controls);
+    void setOutputMode(int mode);
     void positionHud();
     void saveSettings() const;
 
@@ -71,6 +76,8 @@ private:
     bool keyDown(int vk) const;
     void drawKey(QPainter &p, const KeyDef &key, bool active);
     void drawMouse(QPainter &p);
+    void drawContent(QPainter &p);
+    void refreshRenderedFrame();
     QString settingsFilePath() const;
 
 #ifdef Q_OS_WIN
@@ -88,6 +95,10 @@ private:
     QVector<KeyDef> keys_;
     QStringList selectedKeyIds_;
     quint32 mouseControls_ = MouseAll;
+    int outputMode_ = 0;
+
+    mutable QMutex frameMutex_;
+    QImage renderedFrame_;
 
     bool enabled_ = false;
     int opacityPercent_ = 92;
