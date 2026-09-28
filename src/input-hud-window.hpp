@@ -70,5 +70,5 @@ private:
     qint64 wheelFlashStartMs_ = -1;
 
     int baseWidth_ = 620;
-    int baseHeight_ = 258;
+    int baseHeight_ = 296;
 };
