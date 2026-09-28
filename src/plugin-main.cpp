@@ -2129,6 +2129,57 @@ obs_source_info makeInputHudSourceInfo()
 obs_source_info inputHudSourceInfo =
     makeInputHudSourceInfo();
 
+void anchorInputHudAtBottomLeft(
+    obs_sceneitem_t *item,
+    uint32_t sourceHeight)
+{
+    if (!item ||
+        obs_sceneitem_get_alignment(item) !=
+            (OBS_ALIGN_LEFT | OBS_ALIGN_TOP) ||
+        obs_sceneitem_get_bounds_type(item) !=
+            OBS_BOUNDS_NONE)
+        return;
+
+    // Existing scenes used a top-left anchor. Move the anchor to the
+    // current bottom edge before changing the source's rendered size.
+    struct vec2 pos;
+    struct vec2 scale;
+    obs_sceneitem_get_pos(item, &pos);
+    obs_sceneitem_get_scale(item, &scale);
+    pos.y += static_cast<float>(sourceHeight) * scale.y;
+
+    obs_sceneitem_defer_update_begin(item);
+    obs_sceneitem_set_alignment(
+        item,
+        OBS_ALIGN_LEFT | OBS_ALIGN_BOTTOM);
+    obs_sceneitem_set_pos(item, &pos);
+    obs_sceneitem_defer_update_end(item);
+}
+
+void anchorInputHudInAllScenes()
+{
+    obs_frontend_source_list scenes{};
+    obs_frontend_get_scenes(&scenes);
+    const uint32_t height =
+        inputHudSourceHeight(nullptr);
+
+    for (size_t i = 0; i < scenes.sources.num; ++i) {
+        obs_scene_t *scene =
+            obs_scene_from_source(
+                scenes.sources.array[i]);
+        if (!scene)
+            continue;
+
+        anchorInputHudAtBottomLeft(
+            obs_scene_find_source(
+                scene,
+                kInputHudSourceName),
+            height);
+    }
+
+    obs_frontend_source_list_free(&scenes);
+}
+
 bool applyInputHudVideoSource()
 {
     if (!g_inputHud)
@@ -2195,6 +2246,10 @@ bool applyInputHudVideoSource()
             source);
 
     if (item) {
+        if (!newItem)
+            anchorInputHudAtBottomLeft(
+                item,
+                inputHudSourceHeight(nullptr));
         obs_sceneitem_set_visible(
             item,
             g_inputHud->shown());
@@ -2205,10 +2260,6 @@ bool applyInputHudVideoSource()
         obs_get_video_info(
             &videoInfo);
 
-        const uint32_t sourceHeight =
-            inputHudSourceHeight(
-                nullptr);
-
         struct vec2 pos;
         pos.x = 22.0f;
         pos.y =
@@ -2217,8 +2268,6 @@ bool applyInputHudVideoSource()
                     0,
                     static_cast<int>(
                         videoInfo.base_height) -
-                        static_cast<int>(
-                            sourceHeight) -
                         22));
 
         obs_sceneitem_set_pos(
@@ -2227,7 +2276,7 @@ bool applyInputHudVideoSource()
         obs_sceneitem_set_alignment(
             item,
             OBS_ALIGN_LEFT |
-                OBS_ALIGN_TOP);
+                OBS_ALIGN_BOTTOM);
 
         struct vec2 scale;
         scale.x = 1.0f;
@@ -5423,6 +5472,13 @@ static void show_settings()
                 QStringLiteral("%1%")
                     .arg(value));
             if (g_inputHud) {
+                // Preserve the bottom edge in every scene before the
+                // rendered source changes dimensions.
+                if (g_inputHud->enabled() &&
+                    g_inputHud->outputMode() != 0) {
+                    applyInputHudVideoSource();
+                    anchorInputHudInAllScenes();
+                }
                 g_inputHud->setScalePercent(
                     value);
             }
