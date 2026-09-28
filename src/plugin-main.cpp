@@ -4912,6 +4912,10 @@ static void show_settings()
                 inputScale->value());
             g_inputHud->setOpacityPercent(
                 inputOpacity->value());
+            g_inputHud->setSelectedKeyIds(
+                inputKeyIds);
+            g_inputHud->setMouseControls(
+                inputMouseControls);
             g_inputHud->saveSettings();
         }
 
@@ -5052,6 +5056,10 @@ static void show_settings()
                 originalInputHudScale);
             g_inputHud->setOpacityPercent(
                 originalInputHudOpacity);
+            g_inputHud->setSelectedKeyIds(
+                originalInputKeyIds);
+            g_inputHud->setMouseControls(
+                originalInputMouseControls);
         }
 
         applyHudOverlays(originalOverlayConfigs);
