@@ -41,6 +41,7 @@ public:
     ~ClatashaInputHudWindow() override;
 
     bool enabled() const { return enabled_; }
+    bool shown() const { return shown_; }
     int opacityPercent() const { return opacityPercent_; }
     int scalePercent() const { return scalePercent_; }
     QStringList selectedKeyIds() const { return selectedKeyIds_; }
@@ -51,6 +52,7 @@ public:
     static QStringList fpsDefaultKeyIds();
 
     void setEnabled(bool enabled);
+    void toggleShown();
     void setOpacityPercent(int value);
     void setScalePercent(int value);
     void setSelectedKeyIds(const QStringList &ids);
@@ -101,6 +103,7 @@ private:
     QImage renderedFrame_;
 
     bool enabled_ = false;
+    bool shown_ = true;
     int opacityPercent_ = 92;
     int scalePercent_ = 100;
     int wheelDirection_ = 0;
