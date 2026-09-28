@@ -3319,7 +3319,7 @@ static void show_settings()
     dialog.setWindowFlag(Qt::WindowMaximizeButtonHint, true);
     dialog.setWindowFlag(Qt::WindowMinimizeButtonHint, true);
     dialog.setSizeGripEnabled(true);
-    dialog.setMinimumSize(720, 520);
+    dialog.setMinimumSize(680, 440);
 
     QScreen *settingsScreen = parent ? parent->screen() : QGuiApplication::primaryScreen();
     const QRect availableGeometry =
@@ -3329,8 +3329,19 @@ static void show_settings()
         qMin(930, qMax(720, availableGeometry.width() - 40)));
     const int initialHeight = qMax(
         dialog.minimumHeight(),
-        qMin(720, qMax(520, availableGeometry.height() - 40)));
+        qMin(
+            660,
+            qMax(
+                dialog.minimumHeight(),
+                availableGeometry.height() - 100)));
     dialog.resize(initialWidth, initialHeight);
+    dialog.setMaximumSize(
+        qMax(
+            dialog.minimumWidth(),
+            availableGeometry.width() - 20),
+        qMax(
+            dialog.minimumHeight(),
+            availableGeometry.height() - 20));
 
     auto *pages = new QStackedWidget(&dialog);
 
