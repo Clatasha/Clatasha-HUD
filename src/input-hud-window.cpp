@@ -26,10 +26,10 @@ namespace {
 constexpr int kScreenMargin = 22;
 const QColor kIdleFill(12, 22, 20, 205);
 const QColor kIdleStroke(225, 238, 233, 235);
-const QColor kActiveFill(84, 170, 51, 245);
-const QColor kActiveStroke(193, 255, 165, 255);
-const QColor kPanelFill(5, 15, 13, 155);
-const QColor kMouseGlow(80, 205, 72, 255);
+const QColor kActiveFill(0, 164, 255, 245);
+const QColor kActiveStroke(124, 226, 255, 255);
+const QColor kPanelFill(5, 15, 20, 155);
+const QColor kMouseGlow(0, 198, 255, 255);
 const QColor kText(240, 247, 244, 255);
 }
 
@@ -340,7 +340,7 @@ void ClatashaInputHudWindow::drawKey(
         p.save();
         p.setPen(
             QPen(
-                QColor(98, 255, 101, 120),
+                QColor(0, 190, 255, 145),
                 5.0));
         p.drawPath(path);
         p.restore();
@@ -360,121 +360,231 @@ void ClatashaInputHudWindow::drawKey(
 
 void ClatashaInputHudWindow::drawMouse(QPainter &p)
 {
-    const QRectF area(430.0, 18.0, 165.0, 218.0);
+    const QRectF area(
+        430.0,
+        18.0,
+        165.0,
+        242.0);
 
-    const bool left = keyDown(VK_LBUTTON);
-    const bool right = keyDown(VK_RBUTTON);
-    const bool middle = keyDown(VK_MBUTTON);
-    const bool side1 = keyDown(VK_XBUTTON1);
-    const bool side2 = keyDown(VK_XBUTTON2);
+    const bool left =
+        keyDown(VK_LBUTTON);
+    const bool right =
+        keyDown(VK_RBUTTON);
+    const bool middle =
+        keyDown(VK_MBUTTON);
+
+    // Windows' XBUTTON numbering is opposite to the front/back physical
+    // placement used by the Clatasha mouse drawing on the test mouse.
+    const bool sideFront =
+        keyDown(VK_XBUTTON2);
+    const bool sideBack =
+        keyDown(VK_XBUTTON1);
+
+    const qreal cx =
+        area.center().x();
+    const qreal top =
+        area.top() + 4.0;
+    const qreal buttonBottom =
+        area.top() + 96.0;
 
     QPainterPath body;
-    body.moveTo(area.center().x(), area.top() + 5);
+    body.moveTo(
+        cx,
+        top);
     body.cubicTo(
-        area.left() + 16, area.top() + 8,
-        area.left() + 9, area.top() + 70,
-        area.left() + 12, area.top() + 125);
+        area.left() + 26,
+        top + 2,
+        area.left() + 12,
+        area.top() + 58,
+        area.left() + 12,
+        area.top() + 126);
     body.cubicTo(
-        area.left() + 15, area.bottom() - 25,
-        area.center().x() - 28, area.bottom() - 4,
-        area.center().x(), area.bottom());
+        area.left() + 12,
+        area.bottom() - 34,
+        cx - 34,
+        area.bottom() - 3,
+        cx,
+        area.bottom());
     body.cubicTo(
-        area.center().x() + 28, area.bottom() - 4,
-        area.right() - 15, area.bottom() - 25,
-        area.right() - 12, area.top() + 125);
+        cx + 34,
+        area.bottom() - 3,
+        area.right() - 12,
+        area.bottom() - 34,
+        area.right() - 12,
+        area.top() + 126);
     body.cubicTo(
-        area.right() - 9, area.top() + 70,
-        area.right() - 16, area.top() + 8,
-        area.center().x(), area.top() + 5);
+        area.right() - 12,
+        area.top() + 58,
+        area.right() - 26,
+        top + 2,
+        cx,
+        top);
+    body.closeSubpath();
 
-    p.setPen(QPen(kIdleStroke, 2.0));
-    p.setBrush(QColor(8, 21, 18, 215));
+    p.setPen(
+        QPen(
+            kIdleStroke,
+            2.0));
+    p.setBrush(
+        QColor(
+            8,
+            21,
+            27,
+            220));
     p.drawPath(body);
 
-    const qreal cx = area.center().x();
-    const qreal top = area.top() + 8;
-    const qreal splitY = area.top() + 95;
+    // Clean, non-overlapping top click zones. Each half is clipped to the
+    // mouse shell, so the center divider remains crisp.
+    QPainterPath leftClip;
+    leftClip.addRect(
+        QRectF(
+            area.left(),
+            top,
+            cx - area.left() - 2.0,
+            buttonBottom - top));
 
-    QPainterPath leftButton;
-    leftButton.moveTo(cx - 2, top);
-    leftButton.lineTo(cx - 2, splitY);
-    leftButton.cubicTo(
-        area.left() + 24, splitY - 12,
-        area.left() + 15, area.top() + 55,
-        area.left() + 18, area.top() + 24);
-    leftButton.cubicTo(
-        area.left() + 34, area.top() + 10,
-        cx - 25, top + 1,
-        cx - 2, top);
+    QPainterPath rightClip;
+    rightClip.addRect(
+        QRectF(
+            cx + 2.0,
+            top,
+            area.right() - cx - 2.0,
+            buttonBottom - top));
 
-    QPainterPath rightButton;
-    rightButton.moveTo(cx + 2, top);
-    rightButton.lineTo(cx + 2, splitY);
-    rightButton.cubicTo(
-        area.right() - 24, splitY - 12,
-        area.right() - 15, area.top() + 55,
-        area.right() - 18, area.top() + 24);
-    rightButton.cubicTo(
-        area.right() - 34, area.top() + 10,
-        cx + 25, top + 1,
-        cx + 2, top);
+    const QPainterPath leftButton =
+        body.intersected(leftClip);
+    const QPainterPath rightButton =
+        body.intersected(rightClip);
 
-    auto drawRegion =
+    auto drawButtonRegion =
         [&](const QPainterPath &path,
             bool active) {
+            p.save();
+            p.setPen(Qt::NoPen);
             p.fillPath(
                 path,
                 active
-                    ? QColor(61, 183, 61, 230)
-                    : QColor(16, 31, 27, 220));
-            p.setPen(
-                QPen(
-                    active
-                        ? kActiveStroke
-                        : kIdleStroke,
-                    active ? 2.2 : 1.3));
-            p.drawPath(path);
+                    ? kActiveFill
+                    : QColor(
+                          15,
+                          29,
+                          36,
+                          225));
 
             if (active) {
-                p.save();
                 p.setPen(
                     QPen(
-                        QColor(90, 255, 95, 100),
-                        7.0));
+                        QColor(
+                            0,
+                            195,
+                            255,
+                            120),
+                        6.0));
                 p.drawPath(path);
-                p.restore();
             }
+            p.restore();
         };
 
-    drawRegion(leftButton, left);
-    drawRegion(rightButton, right);
+    drawButtonRegion(
+        leftButton,
+        left);
+    drawButtonRegion(
+        rightButton,
+        right);
+
+    // Redraw shell and separators over the fills to keep the geometry clean.
+    p.setPen(
+        QPen(
+            kIdleStroke,
+            2.0));
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(body);
+
+    p.setPen(
+        QPen(
+            kIdleStroke,
+            1.6));
+    p.drawLine(
+        QPointF(
+            cx,
+            top + 1),
+        QPointF(
+            cx,
+            buttonBottom - 5));
+
+    QPainterPath topDivider;
+    topDivider.moveTo(
+        area.left() + 15,
+        buttonBottom);
+    topDivider.cubicTo(
+        area.left() + 46,
+        buttonBottom + 20,
+        cx - 22,
+        buttonBottom + 20,
+        cx,
+        buttonBottom + 6);
+    topDivider.cubicTo(
+        cx + 22,
+        buttonBottom + 20,
+        area.right() - 46,
+        buttonBottom + 20,
+        area.right() - 15,
+        buttonBottom);
+    p.drawPath(topDivider);
 
     const QRectF wheel(
         cx - 10,
-        area.top() + 25,
+        area.top() + 26,
         20,
-        51);
+        52);
+
     p.setPen(
         QPen(
             middle
                 ? kActiveStroke
                 : kIdleStroke,
-            middle ? 2.0 : 1.3));
+            middle
+                ? 2.0
+                : 1.3));
     p.setBrush(
         middle
             ? kActiveFill
-            : QColor(17, 35, 30, 235));
-    p.drawRoundedRect(wheel, 8, 8);
+            : QColor(
+                  17,
+                  35,
+                  41,
+                  235));
+    p.drawRoundedRect(
+        wheel,
+        8,
+        8);
+
+    if (middle) {
+        p.save();
+        p.setPen(
+            QPen(
+                QColor(
+                    0,
+                    195,
+                    255,
+                    120),
+                5.0));
+        p.drawRoundedRect(
+            wheel,
+            8,
+            8);
+        p.restore();
+    }
 
     if (wheelDirection_ != 0) {
         const QPointF center =
             wheel.center();
-        QPainterPath arrow;
 
+        QPainterPath arrow;
         if (wheelDirection_ > 0) {
             arrow.moveTo(
                 center.x(),
-                center.y() - 10);
+                center.y() - 11);
             arrow.lineTo(
                 center.x() - 5,
                 center.y() - 2);
@@ -484,7 +594,7 @@ void ClatashaInputHudWindow::drawMouse(QPainter &p)
         } else {
             arrow.moveTo(
                 center.x(),
-                center.y() + 10);
+                center.y() + 11);
             arrow.lineTo(
                 center.x() - 5,
                 center.y() + 2);
@@ -492,44 +602,72 @@ void ClatashaInputHudWindow::drawMouse(QPainter &p)
                 center.x() + 5,
                 center.y() + 2);
         }
-
         arrow.closeSubpath();
-        p.fillPath(arrow, kMouseGlow);
+        p.fillPath(
+            arrow,
+            kMouseGlow);
     }
 
-    const QRectF sideOne(
-        area.left() + 3,
-        area.top() + 89,
-        11,
-        35);
-    const QRectF sideTwo(
-        area.left() + 3,
-        area.top() + 130,
-        11,
-        29);
+    // Front button is physically above the rear button in this side view.
+    const QRectF sideFrontRect(
+        area.left() + 2,
+        area.top() + 95,
+        12,
+        37);
+    const QRectF sideBackRect(
+        area.left() + 2,
+        area.top() + 139,
+        12,
+        31);
 
-    p.setPen(QPen(kIdleStroke, 1.2));
-    p.setBrush(
-        side1
-            ? kActiveFill
-            : QColor(13, 29, 25, 230));
-    p.drawRoundedRect(sideOne, 4, 4);
-    p.setBrush(
-        side2
-            ? kActiveFill
-            : QColor(13, 29, 25, 230));
-    p.drawRoundedRect(sideTwo, 4, 4);
+    auto drawSide =
+        [&](const QRectF &rect,
+            bool active) {
+            p.setPen(
+                QPen(
+                    active
+                        ? kActiveStroke
+                        : kIdleStroke,
+                    active
+                        ? 1.8
+                        : 1.2));
+            p.setBrush(
+                active
+                    ? kActiveFill
+                    : QColor(
+                          13,
+                          29,
+                          35,
+                          235));
+            p.drawRoundedRect(
+                rect,
+                4,
+                4);
+        };
+
+    drawSide(
+        sideFrontRect,
+        sideFront);
+    drawSide(
+        sideBackRect,
+        sideBack);
 
     const QRectF badge(
         cx - 13,
-        area.top() + 84,
+        area.top() + 102,
         26,
         26);
-    p.setPen(Qt::NoPen);
-    p.setBrush(QColor(55, 139, 45, 235));
-    p.drawEllipse(badge);
-    p.setPen(Qt::white);
 
+    p.setPen(Qt::NoPen);
+    p.setBrush(
+        QColor(
+            0,
+            145,
+            225,
+            245));
+    p.drawEllipse(badge);
+
+    p.setPen(Qt::white);
     QFont badgeFont(
         QStringLiteral("Segoe UI"),
         9,
