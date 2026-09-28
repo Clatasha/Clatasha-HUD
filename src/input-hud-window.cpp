@@ -123,7 +123,7 @@ ClatashaInputHudWindow::ClatashaInputHudWindow(QWidget *parent)
     positionHud();
     refreshRenderedFrame();
 
-    if (enabled_ && outputMode_ != 1)
+    if (enabled_ && shown_ && outputMode_ != 1)
         show();
     else
         hide();
@@ -263,7 +263,7 @@ void ClatashaInputHudWindow::setEnabled(bool enabled)
 {
     enabled_ = enabled;
 
-    if (enabled_ && outputMode_ != 1) {
+    if (enabled_ && shown_ && outputMode_ != 1) {
         positionHud();
         show();
         raise();
@@ -272,6 +272,18 @@ void ClatashaInputHudWindow::setEnabled(bool enabled)
     }
 
     refreshRenderedFrame();
+}
+
+void ClatashaInputHudWindow::toggleShown()
+{
+    shown_ = !shown_;
+    if (enabled_ && shown_ && outputMode_ != 1) {
+        positionHud();
+        show();
+        raise();
+    } else {
+        hide();
+    }
 }
 
 void ClatashaInputHudWindow::setOpacityPercent(int value)
@@ -316,7 +328,7 @@ void ClatashaInputHudWindow::setOutputMode(int mode)
     outputMode_ =
         std::clamp(mode, 0, 2);
 
-    if (enabled_ && outputMode_ != 1) {
+    if (enabled_ && shown_ && outputMode_ != 1) {
         positionHud();
         show();
         raise();
