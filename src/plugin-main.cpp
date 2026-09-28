@@ -3307,6 +3307,20 @@ static void show_settings()
         g_inputHud
             ? g_inputHud->scalePercent()
             : 100;
+    const QStringList originalInputKeyIds =
+        g_inputHud
+            ? g_inputHud->selectedKeyIds()
+            : ClatashaInputHudWindow::fpsDefaultKeyIds();
+    const quint32 originalInputMouseControls =
+        g_inputHud
+            ? g_inputHud->mouseControls()
+            : static_cast<quint32>(
+                  ClatashaInputHudWindow::MouseAll);
+
+    QStringList inputKeyIds =
+        originalInputKeyIds;
+    quint32 inputMouseControls =
+        originalInputMouseControls;
 
     const auto originalOverlayConfigs = loadOverlayConfigs();
     auto overlayConfigs = originalOverlayConfigs;
