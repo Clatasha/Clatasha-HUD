@@ -4127,7 +4127,7 @@ static void show_settings()
                 const char *label;
             };
 
-            const std::array<InputKeyChoice, 26>
+            const std::array<InputKeyChoice, 30>
                 inputKeyChoices{{
                     {"esc", "Esc"},
                     {"f1", "F1"},
@@ -4155,9 +4155,13 @@ static void show_settings()
                     {"ctrl", "Ctrl"},
                     {"alt", "Alt"},
                     {"space", "Space"},
+                    {"up", "↑  Up"},
+                    {"left", "←  Left"},
+                    {"down", "↓  Down"},
+                    {"right", "→  Right"},
                 }};
 
-            std::array<QCheckBox *, 26>
+            std::array<QCheckBox *, 30>
                 keyChecks{};
 
             for (size_t i = 0;
@@ -4294,11 +4298,23 @@ static void show_settings()
                 &QPushButton::clicked,
                 &editor,
                 [&]() {
-                    for (QCheckBox *check :
-                         keyChecks) {
-                        if (check)
-                            check->setChecked(true);
+                    const QStringList defaults =
+                        ClatashaInputHudWindow::
+                            fpsDefaultKeyIds();
+
+                    for (size_t i = 0;
+                         i < inputKeyChoices.size();
+                         ++i) {
+                        if (!keyChecks[i])
+                            continue;
+
+                        keyChecks[i]->setChecked(
+                            defaults.contains(
+                                QString::fromUtf8(
+                                    inputKeyChoices[i].id),
+                                Qt::CaseInsensitive));
                     }
+
                     for (QCheckBox *check :
                          mouseChecks) {
                         if (check)
