@@ -6105,14 +6105,23 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
             const auto configs = loadOverlayConfigs();
             applyVideoOverlays(configs);
             applyHudOverlays(configs);
-            QTimer::singleShot(1200, []() { applyHudOverlays(loadOverlayConfigs()); });
+            applyInputHudVideoSource();
+            QTimer::singleShot(
+                1200,
+                []() {
+                    applyHudOverlays(
+                        loadOverlayConfigs());
+                    applyInputHudVideoSource();
+                });
         }
         break;
 
     case OBS_FRONTEND_EVENT_SCENE_CHANGED:
         enforceGameCaptureHudExclusion();
         updateDisplayCaptureSafeMode();
-        applyVideoOverlays(loadOverlayConfigs());
+        applyVideoOverlays(
+            loadOverlayConfigs());
+        applyInputHudVideoSource();
         break;
 
     case OBS_FRONTEND_EVENT_EXIT:
@@ -6171,6 +6180,10 @@ bool obs_module_load(void)
 #endif
     loadGameWindowSettings();
     loadCachedUpdateCheck();
+
+    obs_register_source(
+        &inputHudSourceInfo);
+
     obs_frontend_add_event_callback(on_frontend_event, nullptr);
     registerHudHotkeys();
 
