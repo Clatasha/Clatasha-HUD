@@ -3603,6 +3603,10 @@ static void show_settings()
             ? g_inputHud->mouseControls()
             : static_cast<quint32>(
                   ClatashaInputHudWindow::MouseAll);
+    const int originalInputOutputMode =
+        g_inputHud
+            ? g_inputHud->outputMode()
+            : 0;
 
     QStringList inputKeyIds =
         originalInputKeyIds;
@@ -4205,13 +4209,19 @@ static void show_settings()
     auto *inputOutput =
         new QComboBox(inputHudCard);
     inputOutput->addItem(
-        QStringLiteral("HUD (local only)"));
+        QStringLiteral("HUD"),
+        0);
     inputOutput->addItem(
-        QStringLiteral("VIDEO — coming next iteration"));
+        QStringLiteral("VIDEO"),
+        1);
     inputOutput->addItem(
-        QStringLiteral("HUD / VIDEO — coming next iteration"));
-    inputOutput->setCurrentIndex(0);
-    inputOutput->setEnabled(false);
+        QStringLiteral("BOTH"),
+        2);
+    inputOutput->setCurrentIndex(
+        qBound(
+            0,
+            originalInputOutputMode,
+            2));
 
     auto *inputScale =
         new QSlider(
@@ -4274,7 +4284,7 @@ static void show_settings()
     auto *inputHudNote =
         new QLabel(
             QStringLiteral(
-                "FPS Default keeps the reference layout. Custom lets you choose exactly which preset keys respond and which mouse controls are active. The layout remains bottom-left and capture-excluded while we iterate on full layout editing and VIDEO/Both output."),
+                "HUD keeps the Input HUD private and capture-excluded. VIDEO adds the same live keyboard/mouse HUD directly to the current OBS scene. BOTH keeps the private local HUD and the OBS source active together."),
             inputHudCard);
     inputHudNote->setWordWrap(true);
     inputHudNote->setProperty(
@@ -5367,6 +5377,19 @@ static void show_settings()
         });
 
     QObject::connect(
+        inputOutput,
+        QOverload<int>::of(
+            &QComboBox::currentIndexChanged),
+        &dialog,
+        [&](int index) {
+            if (!g_inputHud)
+                return;
+
+            g_inputHud->setOutputMode(index);
+            applyInputHudVideoSource();
+        });
+
+    QObject::connect(
         inputScale,
         &QSlider::valueChanged,
         &dialog,
@@ -5900,7 +5923,18 @@ static void show_settings()
                 inputKeyIds);
             g_inputHud->setMouseControls(
                 inputMouseControls);
+            g_inputHud->setOutputMode(
+                inputOutput->currentData().toInt());
             g_inputHud->saveSettings();
+
+            if (!applyInputHudVideoSource()) {
+                QMessageBox::warning(
+                    &dialog,
+                    QStringLiteral("Input HUD"),
+                    QStringLiteral(
+                        "Clatasha could not add the Input HUD source to the current OBS scene."));
+                return false;
+            }
         }
 
         saveOverlayConfigs(overlayConfigs);
@@ -6044,6 +6078,9 @@ static void show_settings()
                 originalInputKeyIds);
             g_inputHud->setMouseControls(
                 originalInputMouseControls);
+            g_inputHud->setOutputMode(
+                originalInputOutputMode);
+            applyInputHudVideoSource();
         }
 
         applyHudOverlays(originalOverlayConfigs);
