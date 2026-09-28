@@ -1945,6 +1945,291 @@ bool applyVideoOpacityFilter(obs_source_t *source, int opacityPercent)
     return true;
 }
 
+
+constexpr const char *kInputHudSourceId =
+    "clatasha_input_hud_source";
+constexpr const char *kInputHudSourceName =
+    "Clatasha Input HUD";
+
+struct InputHudObsSource {
+    obs_source_t *source = nullptr;
+    gs_texture_t *texture = nullptr;
+    uint32_t textureWidth = 0;
+    uint32_t textureHeight = 0;
+};
+
+const char *inputHudSourceGetName(void *)
+{
+    return "Clatasha Input HUD";
+}
+
+void *inputHudSourceCreate(
+    obs_data_t *,
+    obs_source_t *source)
+{
+    auto *context =
+        new InputHudObsSource();
+    context->source = source;
+    return context;
+}
+
+void inputHudSourceDestroy(void *data)
+{
+    auto *context =
+        static_cast<InputHudObsSource *>(
+            data);
+    if (!context)
+        return;
+
+    if (context->texture) {
+        obs_enter_graphics();
+        gs_texture_destroy(
+            context->texture);
+        obs_leave_graphics();
+        context->texture = nullptr;
+    }
+
+    delete context;
+}
+
+uint32_t inputHudSourceWidth(void *)
+{
+    if (!g_inputHud)
+        return 1;
+
+    const QImage frame =
+        g_inputHud->latestFrame();
+    return frame.isNull()
+               ? static_cast<uint32_t>(
+                     qMax(1, g_inputHud->width()))
+               : static_cast<uint32_t>(
+                     frame.width());
+}
+
+uint32_t inputHudSourceHeight(void *)
+{
+    if (!g_inputHud)
+        return 1;
+
+    const QImage frame =
+        g_inputHud->latestFrame();
+    return frame.isNull()
+               ? static_cast<uint32_t>(
+                     qMax(1, g_inputHud->height()))
+               : static_cast<uint32_t>(
+                     frame.height());
+}
+
+void inputHudSourceRender(
+    void *data,
+    gs_effect_t *)
+{
+    auto *context =
+        static_cast<InputHudObsSource *>(
+            data);
+
+    if (!context ||
+        !g_inputHud ||
+        !g_inputHud->enabled()) {
+        return;
+    }
+
+    QImage frame =
+        g_inputHud->latestFrame();
+    if (frame.isNull())
+        return;
+
+    if (frame.format() !=
+        QImage::Format_ARGB32_Premultiplied) {
+        frame =
+            frame.convertToFormat(
+                QImage::Format_ARGB32_Premultiplied);
+    }
+
+    const uint32_t width =
+        static_cast<uint32_t>(
+            frame.width());
+    const uint32_t height =
+        static_cast<uint32_t>(
+            frame.height());
+
+    if (!width || !height)
+        return;
+
+    if (!context->texture ||
+        context->textureWidth != width ||
+        context->textureHeight != height) {
+        if (context->texture) {
+            gs_texture_destroy(
+                context->texture);
+            context->texture = nullptr;
+        }
+
+        const uint8_t *pixels =
+            frame.constBits();
+        const uint8_t *initialData[] = {
+            pixels,
+        };
+
+        context->texture =
+            gs_texture_create(
+                width,
+                height,
+                GS_BGRA,
+                1,
+                initialData,
+                GS_DYNAMIC);
+        context->textureWidth = width;
+        context->textureHeight = height;
+    } else {
+        gs_texture_set_image(
+            context->texture,
+            frame.constBits(),
+            static_cast<uint32_t>(
+                frame.bytesPerLine()),
+            false);
+    }
+
+    if (!context->texture)
+        return;
+
+    gs_effect_t *effect =
+        obs_get_base_effect(
+            OBS_EFFECT_PREMULTIPLIED_ALPHA);
+
+    while (gs_effect_loop(
+        effect,
+        "Draw")) {
+        obs_source_draw(
+            context->texture,
+            0,
+            0,
+            width,
+            height,
+            false);
+    }
+}
+
+obs_source_info inputHudSourceInfo = {
+    .id = kInputHudSourceId,
+    .type = OBS_SOURCE_TYPE_INPUT,
+    .output_flags = OBS_SOURCE_VIDEO,
+    .get_name = inputHudSourceGetName,
+    .create = inputHudSourceCreate,
+    .destroy = inputHudSourceDestroy,
+    .get_width = inputHudSourceWidth,
+    .get_height = inputHudSourceHeight,
+    .video_render = inputHudSourceRender,
+};
+
+bool applyInputHudVideoSource()
+{
+    if (!g_inputHud)
+        return false;
+
+    obs_source_t *sceneSource =
+        obs_frontend_get_current_scene();
+    if (!sceneSource)
+        return false;
+
+    obs_scene_t *scene =
+        obs_scene_from_source(
+            sceneSource);
+    if (!scene) {
+        obs_source_release(
+            sceneSource);
+        return false;
+    }
+
+    const bool shouldShow =
+        g_inputHud->enabled() &&
+        g_inputHud->outputMode() != 0;
+
+    obs_sceneitem_t *item =
+        obs_scene_find_source(
+            scene,
+            kInputHudSourceName);
+
+    if (!shouldShow) {
+        if (item)
+            obs_sceneitem_remove(item);
+
+        obs_source_release(
+            sceneSource);
+        return true;
+    }
+
+    obs_source_t *source =
+        obs_get_source_by_name(
+            kInputHudSourceName);
+
+    if (!source) {
+        source =
+            obs_source_create(
+                kInputHudSourceId,
+                kInputHudSourceName,
+                nullptr,
+                nullptr);
+    }
+
+    if (!source) {
+        blog(
+            LOG_WARNING,
+            "[Clatasha HUD] Could not create Input HUD OBS source");
+        obs_source_release(
+            sceneSource);
+        return false;
+    }
+
+    if (!item)
+        item = obs_scene_add(
+            scene,
+            source);
+
+    if (item) {
+        obs_video_info videoInfo{};
+        obs_get_video_info(
+            &videoInfo);
+
+        const uint32_t sourceHeight =
+            inputHudSourceHeight(
+                nullptr);
+
+        struct vec2 pos;
+        pos.x = 22.0f;
+        pos.y =
+            static_cast<float>(
+                qMax(
+                    0,
+                    static_cast<int>(
+                        videoInfo.base_height) -
+                        static_cast<int>(
+                            sourceHeight) -
+                        22));
+
+        obs_sceneitem_set_pos(
+            item,
+            &pos);
+        obs_sceneitem_set_alignment(
+            item,
+            OBS_ALIGN_LEFT |
+                OBS_ALIGN_TOP);
+
+        struct vec2 scale;
+        scale.x = 1.0f;
+        scale.y = 1.0f;
+        obs_sceneitem_set_scale(
+            item,
+            &scale);
+    }
+
+    obs_source_release(
+        source);
+    obs_source_release(
+        sceneSource);
+    return item != nullptr;
+}
+
 bool applyVideoOverlays(const std::array<OverlayConfig, kOverlayCount> &configs)
 {
     obs_source_t *sceneSource = obs_frontend_get_current_scene();
