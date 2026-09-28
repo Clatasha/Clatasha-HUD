@@ -210,6 +210,15 @@ void ClatashaInputHudWindow::loadSettings()
                     QStringLiteral("inputHud/mouseControls"),
                     static_cast<quint32>(MouseAll))
             .toUInt();
+
+    outputMode_ =
+        std::clamp(
+            settings.value(
+                        QStringLiteral("inputHud/outputMode"),
+                        0)
+                .toInt(),
+            0,
+            2);
 }
 
 void ClatashaInputHudWindow::saveSettings() const
@@ -242,19 +251,25 @@ void ClatashaInputHudWindow::saveSettings() const
     settings.setValue(
         QStringLiteral("inputHud/mouseControls"),
         mouseControls_);
+    settings.setValue(
+        QStringLiteral("inputHud/outputMode"),
+        outputMode_);
     settings.sync();
 }
 
 void ClatashaInputHudWindow::setEnabled(bool enabled)
 {
     enabled_ = enabled;
-    if (enabled_) {
+
+    if (enabled_ && outputMode_ != 1) {
         positionHud();
         show();
         raise();
     } else {
         hide();
     }
+
+    refreshRenderedFrame();
 }
 
 void ClatashaInputHudWindow::setOpacityPercent(int value)
@@ -287,7 +302,25 @@ void ClatashaInputHudWindow::setMouseControls(
     mouseControls_ =
         controls &
         static_cast<quint32>(MouseAll);
+    rebuildLayout();
+    refreshRenderedFrame();
     update();
+}
+
+void ClatashaInputHudWindow::setOutputMode(int mode)
+{
+    outputMode_ =
+        std::clamp(mode, 0, 2);
+
+    if (enabled_ && outputMode_ != 1) {
+        positionHud();
+        show();
+        raise();
+    } else {
+        hide();
+    }
+
+    refreshRenderedFrame();
 }
 
 void ClatashaInputHudWindow::rebuildLayout()
@@ -790,7 +823,14 @@ void ClatashaInputHudWindow::pollInputs()
         wheelFlashStartMs_ = -1;
     }
 
+    refreshRenderedFrame();
     update();
+}
+
+QImage ClatashaInputHudWindow::latestFrame() const
+{
+    QMutexLocker locker(&frameMutex_);
+    return renderedFrame_;
 }
 
 void ClatashaInputHudWindow::drawKey(
@@ -1162,18 +1202,19 @@ void ClatashaInputHudWindow::drawMouse(QPainter &p)
         QStringLiteral("C"));
 }
 
-void ClatashaInputHudWindow::paintEvent(QPaintEvent *)
+void ClatashaInputHudWindow::drawContent(QPainter &p)
 {
-    if (!enabled_)
-        return;
-
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing, true);
-    p.setRenderHint(QPainter::TextAntialiasing, true);
+    p.setRenderHint(
+        QPainter::Antialiasing,
+        true);
+    p.setRenderHint(
+        QPainter::TextAntialiasing,
+        true);
 
     const qreal scale =
         static_cast<qreal>(width()) /
-        static_cast<qreal>(baseWidth_);
+        static_cast<qreal>(
+            qMax(1, baseWidth_));
     p.scale(scale, scale);
     p.setOpacity(
         static_cast<qreal>(
@@ -1189,20 +1230,55 @@ void ClatashaInputHudWindow::paintEvent(QPaintEvent *)
             baseHeight_ - 1.0),
         14.0,
         14.0);
-    p.fillPath(panel, kPanelFill);
+    p.fillPath(
+        panel,
+        kPanelFill);
     p.setPen(
         QPen(
-            QColor(255, 255, 255, 34),
+            QColor(
+                255,
+                255,
+                255,
+                34),
             1.0));
     p.drawPath(panel);
 
-    for (const KeyDef &key : keys_)
+    for (const KeyDef &key : keys_) {
         drawKey(
             p,
             key,
             keyDown(key.vk));
+    }
 
     drawMouse(p);
+}
+
+void ClatashaInputHudWindow::refreshRenderedFrame()
+{
+    if (!enabled_)
+        return;
+
+    QImage frame(
+        size(),
+        QImage::Format_ARGB32_Premultiplied);
+    frame.fill(Qt::transparent);
+
+    {
+        QPainter painter(&frame);
+        drawContent(painter);
+    }
+
+    QMutexLocker locker(&frameMutex_);
+    renderedFrame_ = frame;
+}
+
+void ClatashaInputHudWindow::paintEvent(QPaintEvent *)
+{
+    if (!enabled_ || outputMode_ == 1)
+        return;
+
+    QPainter painter(this);
+    drawContent(painter);
 }
 
 #ifdef Q_OS_WIN
