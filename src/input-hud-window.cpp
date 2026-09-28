@@ -37,6 +37,38 @@ const QColor kText(240, 247, 244, 255);
 ClatashaInputHudWindow *ClatashaInputHudWindow::hookInstance_ = nullptr;
 #endif
 
+QStringList ClatashaInputHudWindow::fpsDefaultKeyIds()
+{
+    return {
+        QStringLiteral("esc"),
+        QStringLiteral("f1"),
+        QStringLiteral("tilde"),
+        QStringLiteral("1"),
+        QStringLiteral("2"),
+        QStringLiteral("3"),
+        QStringLiteral("4"),
+        QStringLiteral("tab"),
+        QStringLiteral("q"),
+        QStringLiteral("w"),
+        QStringLiteral("e"),
+        QStringLiteral("r"),
+        QStringLiteral("caps"),
+        QStringLiteral("a"),
+        QStringLiteral("s"),
+        QStringLiteral("d"),
+        QStringLiteral("f"),
+        QStringLiteral("g"),
+        QStringLiteral("shift"),
+        QStringLiteral("z"),
+        QStringLiteral("x"),
+        QStringLiteral("c"),
+        QStringLiteral("v"),
+        QStringLiteral("ctrl"),
+        QStringLiteral("alt"),
+        QStringLiteral("space"),
+    };
+}
+
 ClatashaInputHudWindow::ClatashaInputHudWindow(QWidget *parent)
     : QWidget(parent)
 {
@@ -155,6 +187,27 @@ void ClatashaInputHudWindow::loadSettings()
                 .toInt(),
             60,
             160);
+
+    const QString storedKeys =
+        settings.value(
+                    QStringLiteral("inputHud/selectedKeys"),
+                    fpsDefaultKeyIds().join(
+                        QLatin1Char(',')))
+            .toString();
+
+    selectedKeyIds_ =
+        storedKeys.split(
+            QLatin1Char(','),
+            Qt::SkipEmptyParts);
+
+    if (selectedKeyIds_.isEmpty())
+        selectedKeyIds_ = fpsDefaultKeyIds();
+
+    mouseControls_ =
+        settings.value(
+                    QStringLiteral("inputHud/mouseControls"),
+                    static_cast<quint32>(MouseAll))
+            .toUInt();
 }
 
 void ClatashaInputHudWindow::saveSettings() const
@@ -178,6 +231,13 @@ void ClatashaInputHudWindow::saveSettings() const
     settings.setValue(
         QStringLiteral("inputHud/scale"),
         scalePercent_);
+    settings.setValue(
+        QStringLiteral("inputHud/selectedKeys"),
+        selectedKeyIds_.join(
+            QLatin1Char(',')));
+    settings.setValue(
+        QStringLiteral("inputHud/mouseControls"),
+        mouseControls_);
     settings.sync();
 }
 
@@ -209,6 +269,26 @@ void ClatashaInputHudWindow::setScalePercent(int value)
     update();
 }
 
+void ClatashaInputHudWindow::setSelectedKeyIds(
+    const QStringList &ids)
+{
+    selectedKeyIds_ = ids;
+    if (selectedKeyIds_.isEmpty())
+        selectedKeyIds_ = fpsDefaultKeyIds();
+
+    rebuildLayout();
+    update();
+}
+
+void ClatashaInputHudWindow::setMouseControls(
+    quint32 controls)
+{
+    mouseControls_ =
+        controls &
+        static_cast<quint32>(MouseAll);
+    update();
+}
+
 void ClatashaInputHudWindow::rebuildLayout()
 {
     const qreal s =
@@ -225,55 +305,63 @@ void ClatashaInputHudWindow::rebuildLayout()
     const qreal x0 = 18.0;
     const qreal y0 = 18.0;
 
-    auto add = [&](const QString &label,
+    auto add = [&](const QString &id,
+                   const QString &label,
                    int vk,
                    qreal x,
                    qreal y,
                    qreal w = 38.0,
                    qreal h = 38.0) {
+        if (!selectedKeyIds_.contains(
+                id,
+                Qt::CaseInsensitive)) {
+            return;
+        }
+
         keys_.push_back(
             KeyDef{
+                id,
                 label,
                 vk,
                 QRectF(x, y, w, h)});
     };
 
-    add(QStringLiteral("Esc"), VK_ESCAPE, x0, y0, 44);
-    add(QStringLiteral("F1"), VK_F1, x0 + 92, y0, 44);
+    add(QStringLiteral("esc"), QStringLiteral("Esc"), VK_ESCAPE, x0, y0, 44);
+    add(QStringLiteral("f1"), QStringLiteral("F1"), VK_F1, x0 + 92, y0, 44);
 
     const qreal row1 = y0 + key + gap;
-    add(QStringLiteral("~"), VK_OEM_3, x0, row1);
-    add(QStringLiteral("1"), '1', x0 + 44, row1);
-    add(QStringLiteral("2"), '2', x0 + 88, row1);
-    add(QStringLiteral("3"), '3', x0 + 132, row1);
-    add(QStringLiteral("4"), '4', x0 + 176, row1);
+    add(QStringLiteral("tilde"), QStringLiteral("~"), VK_OEM_3, x0, row1);
+    add(QStringLiteral("1"), QStringLiteral("1"), '1', x0 + 44, row1);
+    add(QStringLiteral("2"), QStringLiteral("2"), '2', x0 + 88, row1);
+    add(QStringLiteral("3"), QStringLiteral("3"), '3', x0 + 132, row1);
+    add(QStringLiteral("4"), QStringLiteral("4"), '4', x0 + 176, row1);
 
     const qreal row2 = row1 + key + gap;
-    add(QStringLiteral("Tab"), VK_TAB, x0, row2, 56);
-    add(QStringLiteral("Q"), 'Q', x0 + 62, row2);
-    add(QStringLiteral("W"), 'W', x0 + 106, row2);
-    add(QStringLiteral("E"), 'E', x0 + 150, row2);
-    add(QStringLiteral("R"), 'R', x0 + 194, row2);
+    add(QStringLiteral("tab"), QStringLiteral("Tab"), VK_TAB, x0, row2, 56);
+    add(QStringLiteral("q"), QStringLiteral("Q"), 'Q', x0 + 62, row2);
+    add(QStringLiteral("w"), QStringLiteral("W"), 'W', x0 + 106, row2);
+    add(QStringLiteral("e"), QStringLiteral("E"), 'E', x0 + 150, row2);
+    add(QStringLiteral("r"), QStringLiteral("R"), 'R', x0 + 194, row2);
 
     const qreal row3 = row2 + key + gap;
-    add(QStringLiteral("Caps"), VK_CAPITAL, x0, row3, 62);
-    add(QStringLiteral("A"), 'A', x0 + 68, row3);
-    add(QStringLiteral("S"), 'S', x0 + 112, row3);
-    add(QStringLiteral("D"), 'D', x0 + 156, row3);
-    add(QStringLiteral("F"), 'F', x0 + 200, row3);
-    add(QStringLiteral("G"), 'G', x0 + 244, row3);
+    add(QStringLiteral("caps"), QStringLiteral("Caps"), VK_CAPITAL, x0, row3, 62);
+    add(QStringLiteral("a"), QStringLiteral("A"), 'A', x0 + 68, row3);
+    add(QStringLiteral("s"), QStringLiteral("S"), 'S', x0 + 112, row3);
+    add(QStringLiteral("d"), QStringLiteral("D"), 'D', x0 + 156, row3);
+    add(QStringLiteral("f"), QStringLiteral("F"), 'F', x0 + 200, row3);
+    add(QStringLiteral("g"), QStringLiteral("G"), 'G', x0 + 244, row3);
 
     const qreal row4 = row3 + key + gap;
-    add(QStringLiteral("Shift"), VK_LSHIFT, x0, row4, 82);
-    add(QStringLiteral("Z"), 'Z', x0 + 88, row4);
-    add(QStringLiteral("X"), 'X', x0 + 132, row4);
-    add(QStringLiteral("C"), 'C', x0 + 176, row4);
-    add(QStringLiteral("V"), 'V', x0 + 220, row4);
+    add(QStringLiteral("shift"), QStringLiteral("Shift"), VK_LSHIFT, x0, row4, 82);
+    add(QStringLiteral("z"), QStringLiteral("Z"), 'Z', x0 + 88, row4);
+    add(QStringLiteral("x"), QStringLiteral("X"), 'X', x0 + 132, row4);
+    add(QStringLiteral("c"), QStringLiteral("C"), 'C', x0 + 176, row4);
+    add(QStringLiteral("v"), QStringLiteral("V"), 'V', x0 + 220, row4);
 
     const qreal row5 = row4 + key + gap;
-    add(QStringLiteral("Ctrl"), VK_LCONTROL, x0, row5, 56);
-    add(QStringLiteral("Alt"), VK_LMENU, x0 + 102, row5, 56);
-    add(QStringLiteral("Space"), VK_SPACE, x0 + 164, row5, 220);
+    add(QStringLiteral("ctrl"), QStringLiteral("Ctrl"), VK_LCONTROL, x0, row5, 56);
+    add(QStringLiteral("alt"), QStringLiteral("Alt"), VK_LMENU, x0 + 102, row5, 56);
+    add(QStringLiteral("space"), QStringLiteral("Space"), VK_SPACE, x0 + 164, row5, 220);
 }
 
 void ClatashaInputHudWindow::positionHud()
@@ -367,17 +455,22 @@ void ClatashaInputHudWindow::drawMouse(QPainter &p)
         242.0);
 
     const bool left =
+        (mouseControls_ & MouseLeft) != 0 &&
         keyDown(VK_LBUTTON);
     const bool right =
+        (mouseControls_ & MouseRight) != 0 &&
         keyDown(VK_RBUTTON);
     const bool middle =
+        (mouseControls_ & MouseMiddle) != 0 &&
         keyDown(VK_MBUTTON);
 
     // Windows' XBUTTON numbering is opposite to the front/back physical
     // placement used by the Clatasha mouse drawing on the test mouse.
     const bool sideFront =
+        (mouseControls_ & MouseFront) != 0 &&
         keyDown(VK_XBUTTON2);
     const bool sideBack =
+        (mouseControls_ & MouseBack) != 0 &&
         keyDown(VK_XBUTTON1);
 
     const qreal cx =
@@ -576,7 +669,8 @@ void ClatashaInputHudWindow::drawMouse(QPainter &p)
         p.restore();
     }
 
-    if (wheelDirection_ != 0) {
+    if ((mouseControls_ & MouseWheel) != 0 &&
+        wheelDirection_ != 0) {
         const QPointF center =
             wheel.center();
 
@@ -757,8 +851,10 @@ LRESULT CALLBACK ClatashaInputHudWindow::mouseHookProc(
 
 void ClatashaInputHudWindow::handleMouseWheel(int delta)
 {
-    if (!enabled_)
+    if (!enabled_ ||
+        (mouseControls_ & MouseWheel) == 0) {
         return;
+    }
 
     wheelDirection_ =
         delta > 0 ? 1 : -1;
