@@ -292,6 +292,38 @@ void ClatashaInputHudWindow::setMouseControls(
 
 void ClatashaInputHudWindow::rebuildLayout()
 {
+    const bool showArrowSection =
+        selectedKeyIds_.contains(
+            QStringLiteral("up"),
+            Qt::CaseInsensitive) ||
+        selectedKeyIds_.contains(
+            QStringLiteral("left"),
+            Qt::CaseInsensitive) ||
+        selectedKeyIds_.contains(
+            QStringLiteral("down"),
+            Qt::CaseInsensitive) ||
+        selectedKeyIds_.contains(
+            QStringLiteral("right"),
+            Qt::CaseInsensitive);
+
+    // Compact FPS layout stays at the original 620 px width. When any arrow
+    // key is selected, reserve a full inverted-T cluster between the keyboard
+    // and mouse, move the mouse right, and grow the window to match.
+    constexpr int kCompactWidth = 620;
+    constexpr int kArrowSectionWidth = 150;
+    constexpr qreal kCompactMouseX = 430.0;
+
+    baseWidth_ =
+        showArrowSection
+            ? kCompactWidth +
+                  kArrowSectionWidth
+            : kCompactWidth;
+    mouseBaseX_ =
+        showArrowSection
+            ? kCompactMouseX +
+                  kArrowSectionWidth
+            : kCompactMouseX;
+
     const qreal s =
         static_cast<qreal>(scalePercent_) /
         100.0;
@@ -363,6 +395,38 @@ void ClatashaInputHudWindow::rebuildLayout()
     add(QStringLiteral("ctrl"), QStringLiteral("Ctrl"), VK_LCONTROL, x0, row5, 56);
     add(QStringLiteral("alt"), QStringLiteral("Alt"), VK_LMENU, x0 + 102, row5, 56);
     add(QStringLiteral("space"), QStringLiteral("Space"), VK_SPACE, x0 + 164, row5, 220);
+
+    if (showArrowSection) {
+        const qreal arrowX = 414.0;
+        const qreal arrowTopY = row3 + 4.0;
+        const qreal arrowBottomY =
+            arrowTopY + key + gap;
+
+        add(
+            QStringLiteral("up"),
+            QStringLiteral("↑"),
+            VK_UP,
+            arrowX + 44.0,
+            arrowTopY);
+        add(
+            QStringLiteral("left"),
+            QStringLiteral("←"),
+            VK_LEFT,
+            arrowX,
+            arrowBottomY);
+        add(
+            QStringLiteral("down"),
+            QStringLiteral("↓"),
+            VK_DOWN,
+            arrowX + 44.0,
+            arrowBottomY);
+        add(
+            QStringLiteral("right"),
+            QStringLiteral("→"),
+            VK_RIGHT,
+            arrowX + 88.0,
+            arrowBottomY);
+    }
 }
 
 void ClatashaInputHudWindow::positionHud()
@@ -450,7 +514,7 @@ void ClatashaInputHudWindow::drawKey(
 void ClatashaInputHudWindow::drawMouse(QPainter &p)
 {
     const QRectF area(
-        430.0,
+        mouseBaseX_,
         18.0,
         165.0,
         242.0);
