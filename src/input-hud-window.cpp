@@ -121,7 +121,9 @@ ClatashaInputHudWindow::ClatashaInputHudWindow(QWidget *parent)
     pollTimer_.start();
 
     positionHud();
-    if (enabled_)
+    refreshRenderedFrame();
+
+    if (enabled_ && outputMode_ != 1)
         show();
     else
         hide();
