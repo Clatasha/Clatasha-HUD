@@ -97,4 +97,5 @@ private:
 
     int baseWidth_ = 620;
     int baseHeight_ = 296;
+    qreal mouseBaseX_ = 430.0;
 };
