@@ -67,7 +67,7 @@ HUD browser overlays render through an off-screen OBS `browser_source` so transp
 
 ### Input HUD
 
-Enable the Input HUD in Clatasha HUD Settings → Advanced, choose its keys and mouse controls, then select **HUD**, **VIDEO**, or **BOTH**. VIDEO adds a live **Clatasha Input HUD** source to the current OBS scene; BOTH also keeps the local capture-excluded display. You can move and scale the source in the OBS preview.
+Enable the Input HUD in Clatasha HUD Settings → Advanced, choose its keys and mouse controls, then select **HUD**, **VIDEO**, or **BOTH**. VIDEO adds a live **Clatasha Input HUD** source to the current OBS scene; BOTH also keeps the local capture-excluded display. You can move and scale the source in the OBS preview. The Scale slider keeps the OBS source's bottom edge in place as it grows upward.
 
 Assign **Show/Hide Input HUD** in Clatasha HUD Settings → Hotkeys or OBS Settings → Hotkeys. This shortcut toggles the input display in the selected output mode and starts unassigned. It preserves the OBS source's placement when toggled.
 
