@@ -437,8 +437,8 @@ void ClatashaInputHudWindow::rebuildLayout()
             int vk,
             qreal x,
             qreal y,
-            qreal w = key,
-            qreal h = key) {
+            qreal w = 38.0,
+            qreal h = 38.0) {
             const QString keyId =
                 QString::fromLatin1(id);
 
