@@ -2030,7 +2030,9 @@ void inputHudSourceRender(
 
     if (!context ||
         !g_inputHud ||
-        !g_inputHud->enabled()) {
+        !g_inputHud->enabled() ||
+        !g_inputHud->shown() ||
+        g_inputHud->outputMode() == 0) {
         return;
     }
 
@@ -2040,10 +2042,10 @@ void inputHudSourceRender(
         return;
 
     if (frame.format() !=
-        QImage::Format_ARGB32_Premultiplied) {
+        QImage::Format_ARGB32) {
         frame =
             frame.convertToFormat(
-                QImage::Format_ARGB32_Premultiplied);
+                QImage::Format_ARGB32);
     }
 
     const uint32_t width =
@@ -2093,21 +2095,13 @@ void inputHudSourceRender(
     if (!context->texture)
         return;
 
-    gs_effect_t *effect =
-        obs_get_base_effect(
-            OBS_EFFECT_PREMULTIPLIED_ALPHA);
-
-    while (gs_effect_loop(
-        effect,
-        "Draw")) {
-        obs_source_draw(
-            context->texture,
-            0,
-            0,
-            width,
-            height,
-            false);
-    }
+    obs_source_draw(
+        context->texture,
+        0,
+        0,
+        width,
+        height,
+        false);
 }
 
 obs_source_info makeInputHudSourceInfo()
@@ -2194,12 +2188,19 @@ bool applyInputHudVideoSource()
         return false;
     }
 
-    if (!item)
+    const bool newItem = !item;
+    if (newItem)
         item = obs_scene_add(
             scene,
             source);
 
     if (item) {
+        obs_sceneitem_set_visible(
+            item,
+            g_inputHud->shown());
+    }
+
+    if (newItem && item) {
         obs_video_info videoInfo{};
         obs_get_video_info(
             &videoInfo);
@@ -3214,6 +3215,8 @@ static void ensure_hud()
 
         if (g_inputHud &&
             g_inputHud->enabled() &&
+            g_inputHud->shown() &&
+            g_inputHud->outputMode() != 1 &&
             !g_inputHud->isVisible()) {
             g_inputHud->show();
             g_inputHud->positionHud();
@@ -3258,6 +3261,7 @@ enum class HudHotkeyAction : int {
     PauseRecording,
     ToggleStreaming,
     ToggleGameBorderless,
+    ToggleInputHud,
     Count,
 };
 
@@ -3280,6 +3284,7 @@ static std::array<HudHotkeyDefinition, kHudHotkeyCount> g_hudHotkeys{{
     {"ClatashaHUD.PauseRecording", "Clatasha HUD: Pause/Resume Recording", "Pause/Resume Recording", "Recording"},
     {"ClatashaHUD.ToggleStreaming", "Clatasha HUD: Toggle Streaming", "Toggle Streaming", "Streaming"},
     {"ClatashaHUD.ToggleGameBorderless", "Clatasha HUD: Toggle Game Borderless Fullscreen", "Toggle Game Borderless Fullscreen", "Game Window"},
+    {"ClatashaHUD.ToggleInputHUD", "Clatasha HUD: Show/Hide Input HUD", "Show/Hide Input HUD", "Input HUD"},
 }};
 
 static QString hotkeyCombinationText(obs_key_combination_t combination)
@@ -3461,6 +3466,13 @@ static void runHotkeyActionOnUi(HudHotkeyAction action)
 
             case HudHotkeyAction::ToggleBrowserHudOverlays:
                 toggle_browser_hud_overlays();
+                break;
+
+            case HudHotkeyAction::ToggleInputHud:
+                if (g_inputHud) {
+                    g_inputHud->toggleShown();
+                    applyInputHudVideoSource();
+                }
                 break;
 
             case HudHotkeyAction::ToggleReplayBuffer:
