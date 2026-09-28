@@ -349,41 +349,159 @@ void ClatashaInputHudWindow::rebuildLayout()
     constexpr qreal pad = 18.0;
     constexpr qreal key = 38.0;
     constexpr qreal gap = 6.0;
-    constexpr qreal sectionGap = 16.0;
-    constexpr qreal mainWidth = 676.0;
+
+    // Match the compact feel of the original FPS HUD. Sections keep their
+    // real keyboard coordinates internally, but unused trailing columns no
+    // longer reserve space before the next section.
+    constexpr qreal sectionGap = 28.0;
     constexpr qreal mainHeight = 214.0;
-    constexpr qreal functionWidth = 676.0;
     constexpr qreal functionHeight = 38.0;
-    constexpr qreal navWidth = 126.0;
     constexpr qreal navHeight = 82.0;
-    constexpr qreal arrowWidth = 126.0;
     constexpr qreal arrowHeight = 82.0;
-    constexpr qreal numpadWidth = 170.0;
     constexpr qreal numpadHeight = 214.0;
     constexpr qreal mouseWidth = 165.0;
     constexpr qreal mouseHeight = 242.0;
     constexpr qreal stackGap = 12.0;
 
+    auto includeRight =
+        [&](qreal &right,
+            const char *id,
+            qreal edge) {
+            if (has(id))
+                right = qMax(right, edge);
+        };
+
+    qreal mainRight = 0.0;
+    includeRight(mainRight, "tilde", 38);
+    includeRight(mainRight, "1", 82);
+    includeRight(mainRight, "2", 126);
+    includeRight(mainRight, "3", 170);
+    includeRight(mainRight, "4", 214);
+    includeRight(mainRight, "5", 258);
+    includeRight(mainRight, "6", 302);
+    includeRight(mainRight, "7", 346);
+    includeRight(mainRight, "8", 390);
+    includeRight(mainRight, "9", 434);
+    includeRight(mainRight, "0", 478);
+    includeRight(mainRight, "minus", 522);
+    includeRight(mainRight, "equals", 566);
+    includeRight(mainRight, "backspace", 654);
+
+    includeRight(mainRight, "tab", 56);
+    includeRight(mainRight, "q", 100);
+    includeRight(mainRight, "w", 144);
+    includeRight(mainRight, "e", 188);
+    includeRight(mainRight, "r", 232);
+    includeRight(mainRight, "t", 276);
+    includeRight(mainRight, "y", 320);
+    includeRight(mainRight, "u", 364);
+    includeRight(mainRight, "i", 408);
+    includeRight(mainRight, "o", 452);
+    includeRight(mainRight, "p", 496);
+    includeRight(mainRight, "lbracket", 540);
+    includeRight(mainRight, "rbracket", 584);
+    includeRight(mainRight, "backslash", 654);
+
+    includeRight(mainRight, "caps", 68);
+    includeRight(mainRight, "a", 112);
+    includeRight(mainRight, "s", 156);
+    includeRight(mainRight, "d", 200);
+    includeRight(mainRight, "f", 244);
+    includeRight(mainRight, "g", 288);
+    includeRight(mainRight, "h", 332);
+    includeRight(mainRight, "j", 376);
+    includeRight(mainRight, "k", 420);
+    includeRight(mainRight, "l", 464);
+    includeRight(mainRight, "semicolon", 508);
+    includeRight(mainRight, "quote", 552);
+    includeRight(mainRight, "enter", 654);
+
+    includeRight(mainRight, "shift", 90);
+    includeRight(mainRight, "z", 134);
+    includeRight(mainRight, "x", 178);
+    includeRight(mainRight, "c", 222);
+    includeRight(mainRight, "v", 266);
+    includeRight(mainRight, "b", 310);
+    includeRight(mainRight, "n", 354);
+    includeRight(mainRight, "m", 398);
+    includeRight(mainRight, "comma", 442);
+    includeRight(mainRight, "period", 486);
+    includeRight(mainRight, "slash", 530);
+    includeRight(mainRight, "rshift", 654);
+
+    includeRight(mainRight, "ctrl", 58);
+    includeRight(mainRight, "lwin", 116);
+    includeRight(mainRight, "alt", 174);
+    includeRight(mainRight, "space", 404);
+    includeRight(mainRight, "ralt", 462);
+    includeRight(mainRight, "rwin", 520);
+    includeRight(mainRight, "menu", 588);
+    includeRight(mainRight, "rctrl", 654);
+
+    qreal functionRight = 0.0;
+    includeRight(functionRight, "esc", 44);
+    includeRight(functionRight, "f1", 106);
+    includeRight(functionRight, "f2", 150);
+    includeRight(functionRight, "f3", 194);
+    includeRight(functionRight, "f4", 238);
+    includeRight(functionRight, "f5", 304);
+    includeRight(functionRight, "f6", 348);
+    includeRight(functionRight, "f7", 392);
+    includeRight(functionRight, "f8", 436);
+    includeRight(functionRight, "f9", 502);
+    includeRight(functionRight, "f10", 546);
+    includeRight(functionRight, "f11", 590);
+    includeRight(functionRight, "f12", 634);
+
+    qreal navRight = 0.0;
+    includeRight(navRight, "insert", 38);
+    includeRight(navRight, "home", 82);
+    includeRight(navRight, "pgup", 126);
+    includeRight(navRight, "delete", 38);
+    includeRight(navRight, "end", 82);
+    includeRight(navRight, "pgdn", 126);
+
+    qreal arrowRight = 0.0;
+    includeRight(arrowRight, "up", 82);
+    includeRight(arrowRight, "left", 38);
+    includeRight(arrowRight, "down", 82);
+    includeRight(arrowRight, "right", 126);
+
+    qreal numpadRight = 0.0;
+    includeRight(numpadRight, "numlock", 38);
+    includeRight(numpadRight, "numdivide", 82);
+    includeRight(numpadRight, "nummultiply", 126);
+    includeRight(numpadRight, "numminus", 170);
+    includeRight(numpadRight, "num7", 38);
+    includeRight(numpadRight, "num8", 82);
+    includeRight(numpadRight, "num9", 126);
+    includeRight(numpadRight, "numplus", 170);
+    includeRight(numpadRight, "num4", 38);
+    includeRight(numpadRight, "num5", 82);
+    includeRight(numpadRight, "num6", 126);
+    includeRight(numpadRight, "num1", 38);
+    includeRight(numpadRight, "num2", 82);
+    includeRight(numpadRight, "num3", 126);
+    includeRight(numpadRight, "numenter", 170);
+    includeRight(numpadRight, "num0", 82);
+    includeRight(numpadRight, "numdecimal", 126);
+
     const qreal mainColumnWidth =
-        (mainActive || functionActive)
-            ? qMax(mainWidth, functionWidth)
-            : 0.0;
+        qMax(mainRight, functionRight);
     const qreal mainColumnHeight =
         (mainActive ? mainHeight : 0.0) +
         (functionActive ? functionHeight : 0.0) +
         (mainActive && functionActive ? stackGap : 0.0);
 
     const qreal navColumnWidth =
-        (navigationActive || arrowsActive)
-            ? qMax(navWidth, arrowWidth)
-            : 0.0;
+        qMax(navRight, arrowRight);
     const qreal navColumnHeight =
         (navigationActive ? navHeight : 0.0) +
         (arrowsActive ? arrowHeight : 0.0) +
         (navigationActive && arrowsActive ? stackGap : 0.0);
 
     const qreal numpadColumnWidth =
-        numpadActive ? numpadWidth : 0.0;
+        numpadRight;
     const qreal numpadColumnHeight =
         numpadActive ? numpadHeight : 0.0;
 
