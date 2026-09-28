@@ -4072,7 +4072,17 @@ static void show_settings()
     const int generalPageIndex = pages->addWidget(generalPage);
     const int appearancePageIndex = pages->addWidget(appearancePage);
     const int hotkeysPageIndex = pages->addWidget(hotkeysPage);
-    const int advancedPageIndex = pages->addWidget(advancedPage);
+
+    auto *advancedScroll =
+        new QScrollArea(pages);
+    advancedScroll->setWidgetResizable(true);
+    advancedScroll->setFrameShape(QFrame::NoFrame);
+    advancedScroll->setHorizontalScrollBarPolicy(
+        Qt::ScrollBarAlwaysOff);
+    advancedScroll->setWidget(advancedPage);
+
+    const int advancedPageIndex =
+        pages->addWidget(advancedScroll);
     const int aboutPageIndex = pages->addWidget(aboutPage);
 
     // Branded header: logo sits left of the two-line title/slogan block and is
