@@ -3860,8 +3860,60 @@ static void show_settings()
     auto *inputPreset =
         new QComboBox(inputHudCard);
     inputPreset->addItem(
-        QStringLiteral("FPS Default"));
-    inputPreset->setEnabled(false);
+        QStringLiteral("FPS Default"),
+        0);
+    inputPreset->addItem(
+        QStringLiteral("Custom"),
+        1);
+
+    auto inputSelectionIsDefault =
+        [&]() {
+            QStringList selected =
+                inputKeyIds;
+            QStringList defaults =
+                ClatashaInputHudWindow::
+                    fpsDefaultKeyIds();
+
+            std::sort(
+                selected.begin(),
+                selected.end());
+            std::sort(
+                defaults.begin(),
+                defaults.end());
+
+            return selected ==
+                       defaults &&
+                   inputMouseControls ==
+                       static_cast<quint32>(
+                           ClatashaInputHudWindow::
+                               MouseAll);
+        };
+
+    inputPreset->setCurrentIndex(
+        inputSelectionIsDefault()
+            ? 0
+            : 1);
+
+    auto *editInputControls =
+        new QPushButton(
+            QStringLiteral("Customize Keys / Mouse…"),
+            inputHudCard);
+
+    auto *inputPresetRow =
+        new QWidget(inputHudCard);
+    auto *inputPresetRowLayout =
+        new QHBoxLayout(inputPresetRow);
+    inputPresetRowLayout->setContentsMargins(
+        0,
+        0,
+        0,
+        0);
+    inputPresetRowLayout->setSpacing(8);
+    inputPresetRowLayout->addWidget(
+        inputPreset,
+        1);
+    inputPresetRowLayout->addWidget(
+        editInputControls);
 
     auto *inputOutput =
         new QComboBox(inputHudCard);
@@ -3935,7 +3987,7 @@ static void show_settings()
     auto *inputHudNote =
         new QLabel(
             QStringLiteral(
-                "First working Input HUD build. Uses the FPS preset from the reference: Esc, F1, ~, 1–4, Tab, QWER, Caps, ASDFG, Shift, ZXCV, Ctrl, Alt and Space, plus left/right/middle click, wheel and two side buttons. It starts at the bottom-left and is excluded from Windows display capture."),
+                "FPS Default keeps the reference layout. Custom lets you choose exactly which preset keys respond and which mouse controls are active. The layout remains bottom-left and capture-excluded while we iterate on full layout editing and VIDEO/Both output."),
             inputHudCard);
     inputHudNote->setWordWrap(true);
     inputHudNote->setProperty(
@@ -3946,7 +3998,7 @@ static void show_settings()
         inputHudEnabled);
     inputHudLayout->addRow(
         QStringLiteral("Preset"),
-        inputPreset);
+        inputPresetRow);
     inputHudLayout->addRow(
         QStringLiteral("Output"),
         inputOutput);
@@ -3962,6 +4014,373 @@ static void show_settings()
     advancedLayout->addWidget(
         inputHudCard);
     advancedLayout->addStretch();
+
+    QObject::connect(
+        inputPreset,
+        QOverload<int>::of(
+            &QComboBox::currentIndexChanged),
+        &dialog,
+        [&](int index) {
+            if (index != 0)
+                return;
+
+            inputKeyIds =
+                ClatashaInputHudWindow::
+                    fpsDefaultKeyIds();
+            inputMouseControls =
+                static_cast<quint32>(
+                    ClatashaInputHudWindow::
+                        MouseAll);
+
+            if (g_inputHud) {
+                g_inputHud->setSelectedKeyIds(
+                    inputKeyIds);
+                g_inputHud->setMouseControls(
+                    inputMouseControls);
+            }
+        });
+
+    QObject::connect(
+        editInputControls,
+        &QPushButton::clicked,
+        &dialog,
+        [&]() {
+            QDialog editor(&dialog);
+            editor.setWindowTitle(
+                QStringLiteral(
+                    "Customize Input HUD"));
+            editor.setModal(true);
+            editor.resize(610, 560);
+            editor.setMinimumSize(520, 420);
+
+            auto *editorLayout =
+                new QVBoxLayout(&editor);
+            editorLayout->setContentsMargins(
+                16,
+                16,
+                16,
+                16);
+            editorLayout->setSpacing(12);
+
+            auto *editorTitle =
+                new QLabel(
+                    QStringLiteral(
+                        "Choose Inputs"),
+                    &editor);
+            QFont editorTitleFont =
+                editorTitle->font();
+            editorTitleFont.setPointSize(14);
+            editorTitleFont.setBold(true);
+            editorTitle->setFont(
+                editorTitleFont);
+
+            auto *editorInfo =
+                new QLabel(
+                    QStringLiteral(
+                        "Unchecked keyboard keys stay hidden from the FPS layout. Mouse options control which buttons and wheel actions respond."),
+                    &editor);
+            editorInfo->setWordWrap(true);
+            editorInfo->setProperty(
+                "muted",
+                true);
+
+            editorLayout->addWidget(
+                editorTitle);
+            editorLayout->addWidget(
+                editorInfo);
+
+            auto *editorScroll =
+                new QScrollArea(&editor);
+            editorScroll->setWidgetResizable(true);
+            editorScroll->setFrameShape(
+                QFrame::NoFrame);
+
+            auto *editorBody =
+                new QWidget(editorScroll);
+            auto *editorBodyLayout =
+                new QVBoxLayout(editorBody);
+            editorBodyLayout->setContentsMargins(
+                0,
+                0,
+                6,
+                0);
+            editorBodyLayout->setSpacing(12);
+
+            auto *keyboardGroup =
+                new QGroupBox(
+                    QStringLiteral("Keyboard"),
+                    editorBody);
+            auto *keyboardGrid =
+                new QGridLayout(keyboardGroup);
+            keyboardGrid->setContentsMargins(
+                14,
+                20,
+                14,
+                14);
+            keyboardGrid->setHorizontalSpacing(
+                14);
+            keyboardGrid->setVerticalSpacing(
+                8);
+
+            struct InputKeyChoice {
+                const char *id;
+                const char *label;
+            };
+
+            const std::array<InputKeyChoice, 26>
+                inputKeyChoices{{
+                    {"esc", "Esc"},
+                    {"f1", "F1"},
+                    {"tilde", "~"},
+                    {"1", "1"},
+                    {"2", "2"},
+                    {"3", "3"},
+                    {"4", "4"},
+                    {"tab", "Tab"},
+                    {"q", "Q"},
+                    {"w", "W"},
+                    {"e", "E"},
+                    {"r", "R"},
+                    {"caps", "Caps"},
+                    {"a", "A"},
+                    {"s", "S"},
+                    {"d", "D"},
+                    {"f", "F"},
+                    {"g", "G"},
+                    {"shift", "Shift"},
+                    {"z", "Z"},
+                    {"x", "X"},
+                    {"c", "C"},
+                    {"v", "V"},
+                    {"ctrl", "Ctrl"},
+                    {"alt", "Alt"},
+                    {"space", "Space"},
+                }};
+
+            std::array<QCheckBox *, 26>
+                keyChecks{};
+
+            for (size_t i = 0;
+                 i < inputKeyChoices.size();
+                 ++i) {
+                const auto &choice =
+                    inputKeyChoices[i];
+
+                auto *check =
+                    new QCheckBox(
+                        QString::fromUtf8(
+                            choice.label),
+                        keyboardGroup);
+                check->setChecked(
+                    inputKeyIds.contains(
+                        QString::fromUtf8(
+                            choice.id),
+                        Qt::CaseInsensitive));
+
+                keyChecks[i] = check;
+                keyboardGrid->addWidget(
+                    check,
+                    static_cast<int>(i / 4),
+                    static_cast<int>(i % 4));
+            }
+
+            auto *keyboardButtons =
+                new QHBoxLayout();
+            auto *selectAllKeys =
+                new QPushButton(
+                    QStringLiteral("Select All"),
+                    keyboardGroup);
+            auto *clearKeys =
+                new QPushButton(
+                    QStringLiteral("Clear Keyboard"),
+                    keyboardGroup);
+            keyboardButtons->addWidget(
+                selectAllKeys);
+            keyboardButtons->addWidget(
+                clearKeys);
+            keyboardButtons->addStretch();
+
+            keyboardGrid->addLayout(
+                keyboardButtons,
+                7,
+                0,
+                1,
+                4);
+
+            QObject::connect(
+                selectAllKeys,
+                &QPushButton::clicked,
+                &editor,
+                [&]() {
+                    for (QCheckBox *check :
+                         keyChecks) {
+                        if (check)
+                            check->setChecked(true);
+                    }
+                });
+
+            QObject::connect(
+                clearKeys,
+                &QPushButton::clicked,
+                &editor,
+                [&]() {
+                    for (QCheckBox *check :
+                         keyChecks) {
+                        if (check)
+                            check->setChecked(false);
+                    }
+                });
+
+            auto *mouseGroup =
+                new QGroupBox(
+                    QStringLiteral("Mouse"),
+                    editorBody);
+            auto *mouseGrid =
+                new QGridLayout(mouseGroup);
+            mouseGrid->setContentsMargins(
+                14,
+                20,
+                14,
+                14);
+            mouseGrid->setSpacing(8);
+
+            struct MouseChoice {
+                quint32 bit;
+                const char *label;
+            };
+
+            const std::array<MouseChoice, 6>
+                mouseChoices{{
+                    {ClatashaInputHudWindow::MouseLeft, "Left Click"},
+                    {ClatashaInputHudWindow::MouseRight, "Right Click"},
+                    {ClatashaInputHudWindow::MouseMiddle, "Middle Click"},
+                    {ClatashaInputHudWindow::MouseWheel, "Scroll Up / Down"},
+                    {ClatashaInputHudWindow::MouseFront, "Front Side Button"},
+                    {ClatashaInputHudWindow::MouseBack, "Rear Side Button"},
+                }};
+
+            std::array<QCheckBox *, 6>
+                mouseChecks{};
+
+            for (size_t i = 0;
+                 i < mouseChoices.size();
+                 ++i) {
+                const auto &choice =
+                    mouseChoices[i];
+
+                auto *check =
+                    new QCheckBox(
+                        QString::fromUtf8(
+                            choice.label),
+                        mouseGroup);
+                check->setChecked(
+                    (inputMouseControls &
+                     choice.bit) != 0);
+                mouseChecks[i] = check;
+
+                mouseGrid->addWidget(
+                    check,
+                    static_cast<int>(i / 2),
+                    static_cast<int>(i % 2));
+            }
+
+            auto *resetPreset =
+                new QPushButton(
+                    QStringLiteral(
+                        "Reset to FPS Default"),
+                    editorBody);
+            QObject::connect(
+                resetPreset,
+                &QPushButton::clicked,
+                &editor,
+                [&]() {
+                    for (QCheckBox *check :
+                         keyChecks) {
+                        if (check)
+                            check->setChecked(true);
+                    }
+                    for (QCheckBox *check :
+                         mouseChecks) {
+                        if (check)
+                            check->setChecked(true);
+                    }
+                });
+
+            editorBodyLayout->addWidget(
+                keyboardGroup);
+            editorBodyLayout->addWidget(
+                mouseGroup);
+            editorBodyLayout->addWidget(
+                resetPreset,
+                0,
+                Qt::AlignLeft);
+            editorBodyLayout->addStretch();
+
+            editorScroll->setWidget(
+                editorBody);
+            editorLayout->addWidget(
+                editorScroll,
+                1);
+
+            auto *editorButtons =
+                new QDialogButtonBox(
+                    QDialogButtonBox::Ok |
+                        QDialogButtonBox::Cancel,
+                    &editor);
+            editorLayout->addWidget(
+                editorButtons);
+
+            QObject::connect(
+                editorButtons,
+                &QDialogButtonBox::accepted,
+                &editor,
+                &QDialog::accept);
+            QObject::connect(
+                editorButtons,
+                &QDialogButtonBox::rejected,
+                &editor,
+                &QDialog::reject);
+
+            if (editor.exec() !=
+                QDialog::Accepted) {
+                return;
+            }
+
+            inputKeyIds.clear();
+            for (size_t i = 0;
+                 i < inputKeyChoices.size();
+                 ++i) {
+                if (keyChecks[i] &&
+                    keyChecks[i]->isChecked()) {
+                    inputKeyIds.push_back(
+                        QString::fromUtf8(
+                            inputKeyChoices[i].id));
+                }
+            }
+
+            inputMouseControls = 0;
+            for (size_t i = 0;
+                 i < mouseChoices.size();
+                 ++i) {
+                if (mouseChecks[i] &&
+                    mouseChecks[i]->isChecked()) {
+                    inputMouseControls |=
+                        mouseChoices[i].bit;
+                }
+            }
+
+            inputPreset->setCurrentIndex(
+                inputSelectionIsDefault()
+                    ? 0
+                    : 1);
+
+            if (g_inputHud) {
+                g_inputHud->setSelectedKeyIds(
+                    inputKeyIds);
+                g_inputHud->setMouseControls(
+                    inputMouseControls);
+            }
+        });
 
     QObject::connect(
         inputScale,
