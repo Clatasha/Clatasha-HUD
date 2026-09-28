@@ -63,6 +63,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
