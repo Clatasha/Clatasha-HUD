@@ -292,143 +292,346 @@ void ClatashaInputHudWindow::setMouseControls(
 
 void ClatashaInputHudWindow::rebuildLayout()
 {
-    const bool showArrowSection =
-        selectedKeyIds_.contains(
-            QStringLiteral("up"),
-            Qt::CaseInsensitive) ||
-        selectedKeyIds_.contains(
-            QStringLiteral("left"),
-            Qt::CaseInsensitive) ||
-        selectedKeyIds_.contains(
-            QStringLiteral("down"),
-            Qt::CaseInsensitive) ||
-        selectedKeyIds_.contains(
-            QStringLiteral("right"),
-            Qt::CaseInsensitive);
+    keys_.clear();
 
-    // Compact FPS layout stays at the original 620 px width. When any arrow
-    // key is selected, reserve a full inverted-T cluster between the keyboard
-    // and mouse, move the mouse right, and grow the window to match.
-    constexpr int kCompactWidth = 620;
-    constexpr int kArrowSectionWidth = 150;
-    constexpr qreal kCompactMouseX = 430.0;
+    const auto has =
+        [&](const char *id) {
+            return selectedKeyIds_.contains(
+                QString::fromLatin1(id),
+                Qt::CaseInsensitive);
+        };
+
+    const auto any =
+        [&](std::initializer_list<const char *> ids) {
+            for (const char *id : ids) {
+                if (has(id))
+                    return true;
+            }
+            return false;
+        };
+
+    const bool mainActive =
+        any({
+            "tilde","1","2","3","4","5","6","7","8","9","0","minus","equals","backspace",
+            "tab","q","w","e","r","t","y","u","i","o","p","lbracket","rbracket","backslash",
+            "caps","a","s","d","f","g","h","j","k","l","semicolon","quote","enter",
+            "shift","z","x","c","v","b","n","m","comma","period","slash","rshift",
+            "ctrl","lwin","alt","space","ralt","rwin","menu","rctrl"
+        });
+
+    const bool functionActive =
+        any({
+            "esc","f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f11","f12"
+        });
+
+    const bool navigationActive =
+        any({
+            "insert","home","pgup","delete","end","pgdn"
+        });
+
+    const bool arrowsActive =
+        any({
+            "up","left","down","right"
+        });
+
+    const bool numpadActive =
+        any({
+            "numlock","numdivide","nummultiply","numminus",
+            "num7","num8","num9","numplus",
+            "num4","num5","num6",
+            "num1","num2","num3","numenter",
+            "num0","numdecimal"
+        });
+
+    const bool mouseActive =
+        mouseControls_ != 0;
+
+    constexpr qreal pad = 18.0;
+    constexpr qreal key = 38.0;
+    constexpr qreal gap = 6.0;
+    constexpr qreal sectionGap = 16.0;
+    constexpr qreal mainWidth = 676.0;
+    constexpr qreal mainHeight = 214.0;
+    constexpr qreal functionWidth = 676.0;
+    constexpr qreal functionHeight = 38.0;
+    constexpr qreal navWidth = 126.0;
+    constexpr qreal navHeight = 82.0;
+    constexpr qreal arrowWidth = 126.0;
+    constexpr qreal arrowHeight = 82.0;
+    constexpr qreal numpadWidth = 170.0;
+    constexpr qreal numpadHeight = 214.0;
+    constexpr qreal mouseWidth = 165.0;
+    constexpr qreal mouseHeight = 242.0;
+    constexpr qreal stackGap = 12.0;
+
+    const qreal mainColumnWidth =
+        (mainActive || functionActive)
+            ? qMax(mainWidth, functionWidth)
+            : 0.0;
+    const qreal mainColumnHeight =
+        (mainActive ? mainHeight : 0.0) +
+        (functionActive ? functionHeight : 0.0) +
+        (mainActive && functionActive ? stackGap : 0.0);
+
+    const qreal navColumnWidth =
+        (navigationActive || arrowsActive)
+            ? qMax(navWidth, arrowWidth)
+            : 0.0;
+    const qreal navColumnHeight =
+        (navigationActive ? navHeight : 0.0) +
+        (arrowsActive ? arrowHeight : 0.0) +
+        (navigationActive && arrowsActive ? stackGap : 0.0);
+
+    const qreal numpadColumnWidth =
+        numpadActive ? numpadWidth : 0.0;
+    const qreal numpadColumnHeight =
+        numpadActive ? numpadHeight : 0.0;
+
+    const qreal mouseColumnWidth =
+        mouseActive ? mouseWidth : 0.0;
+    const qreal mouseColumnHeight =
+        mouseActive ? mouseHeight : 0.0;
+
+    QVector<qreal> activeWidths;
+    if (mainColumnWidth > 0.0)
+        activeWidths.push_back(mainColumnWidth);
+    if (navColumnWidth > 0.0)
+        activeWidths.push_back(navColumnWidth);
+    if (numpadColumnWidth > 0.0)
+        activeWidths.push_back(numpadColumnWidth);
+    if (mouseColumnWidth > 0.0)
+        activeWidths.push_back(mouseColumnWidth);
+
+    qreal contentWidth = 0.0;
+    for (qreal width : activeWidths)
+        contentWidth += width;
+    if (activeWidths.size() > 1)
+        contentWidth +=
+            sectionGap *
+            (activeWidths.size() - 1);
+
+    const qreal contentHeight =
+        qMax(
+            qMax(mainColumnHeight, navColumnHeight),
+            qMax(numpadColumnHeight, mouseColumnHeight));
 
     baseWidth_ =
-        showArrowSection
-            ? kCompactWidth +
-                  kArrowSectionWidth
-            : kCompactWidth;
-    mouseBaseX_ =
-        showArrowSection
-            ? kCompactMouseX +
-                  kArrowSectionWidth
-            : kCompactMouseX;
+        qMax(
+            140,
+            qRound(contentWidth + pad * 2.0));
+    baseHeight_ =
+        qMax(
+            120,
+            qRound(contentHeight + pad * 2.0));
 
-    const qreal s =
+    const qreal scale =
         static_cast<qreal>(scalePercent_) /
         100.0;
     setFixedSize(
-        qRound(baseWidth_ * s),
-        qRound(baseHeight_ * s));
+        qRound(baseWidth_ * scale),
+        qRound(baseHeight_ * scale));
 
-    keys_.clear();
+    auto add =
+        [&](const char *id,
+            const QString &label,
+            int vk,
+            qreal x,
+            qreal y,
+            qreal w = key,
+            qreal h = key) {
+            const QString keyId =
+                QString::fromLatin1(id);
 
-    const qreal key = 38.0;
-    const qreal gap = 6.0;
-    const qreal x0 = 18.0;
-    const qreal y0 = 18.0;
+            if (!selectedKeyIds_.contains(
+                    keyId,
+                    Qt::CaseInsensitive)) {
+                return;
+            }
 
-    auto add = [&](const QString &id,
-                   const QString &label,
-                   int vk,
-                   qreal x,
-                   qreal y,
-                   qreal w = 38.0,
-                   qreal h = 38.0) {
-        if (!selectedKeyIds_.contains(
-                id,
-                Qt::CaseInsensitive)) {
-            return;
+            keys_.push_back(
+                KeyDef{
+                    keyId,
+                    label,
+                    vk,
+                    QRectF(x, y, w, h)});
+        };
+
+    qreal cursorX = pad;
+
+    if (mainColumnWidth > 0.0) {
+        const qreal columnY =
+            baseHeight_ - pad - mainColumnHeight;
+
+        qreal mainY = columnY;
+        if (functionActive) {
+            const qreal fy = columnY;
+
+            add("esc", QStringLiteral("Esc"), VK_ESCAPE, cursorX, fy, 44);
+            add("f1", QStringLiteral("F1"), VK_F1, cursorX + 68, fy);
+            add("f2", QStringLiteral("F2"), VK_F2, cursorX + 112, fy);
+            add("f3", QStringLiteral("F3"), VK_F3, cursorX + 156, fy);
+            add("f4", QStringLiteral("F4"), VK_F4, cursorX + 200, fy);
+            add("f5", QStringLiteral("F5"), VK_F5, cursorX + 266, fy);
+            add("f6", QStringLiteral("F6"), VK_F6, cursorX + 310, fy);
+            add("f7", QStringLiteral("F7"), VK_F7, cursorX + 354, fy);
+            add("f8", QStringLiteral("F8"), VK_F8, cursorX + 398, fy);
+            add("f9", QStringLiteral("F9"), VK_F9, cursorX + 464, fy);
+            add("f10", QStringLiteral("F10"), VK_F10, cursorX + 508, fy);
+            add("f11", QStringLiteral("F11"), VK_F11, cursorX + 552, fy);
+            add("f12", QStringLiteral("F12"), VK_F12, cursorX + 596, fy);
+
+            mainY +=
+                functionHeight +
+                (mainActive ? stackGap : 0.0);
         }
 
-        keys_.push_back(
-            KeyDef{
-                id,
-                label,
-                vk,
-                QRectF(x, y, w, h)});
-    };
+        if (mainActive) {
+            const qreal r0 = mainY;
+            const qreal r1 = r0 + key + gap;
+            const qreal r2 = r1 + key + gap;
+            const qreal r3 = r2 + key + gap;
+            const qreal r4 = r3 + key + gap;
 
-    add(QStringLiteral("esc"), QStringLiteral("Esc"), VK_ESCAPE, x0, y0, 44);
-    add(QStringLiteral("f1"), QStringLiteral("F1"), VK_F1, x0 + 92, y0, 44);
+            add("tilde", QStringLiteral("~"), VK_OEM_3, cursorX, r0);
+            add("1", QStringLiteral("1"), '1', cursorX + 44, r0);
+            add("2", QStringLiteral("2"), '2', cursorX + 88, r0);
+            add("3", QStringLiteral("3"), '3', cursorX + 132, r0);
+            add("4", QStringLiteral("4"), '4', cursorX + 176, r0);
+            add("5", QStringLiteral("5"), '5', cursorX + 220, r0);
+            add("6", QStringLiteral("6"), '6', cursorX + 264, r0);
+            add("7", QStringLiteral("7"), '7', cursorX + 308, r0);
+            add("8", QStringLiteral("8"), '8', cursorX + 352, r0);
+            add("9", QStringLiteral("9"), '9', cursorX + 396, r0);
+            add("0", QStringLiteral("0"), '0', cursorX + 440, r0);
+            add("minus", QStringLiteral("-"), VK_OEM_MINUS, cursorX + 484, r0);
+            add("equals", QStringLiteral("="), VK_OEM_PLUS, cursorX + 528, r0);
+            add("backspace", QStringLiteral("Back"), VK_BACK, cursorX + 572, r0, 82);
 
-    const qreal row1 = y0 + key + gap;
-    add(QStringLiteral("tilde"), QStringLiteral("~"), VK_OEM_3, x0, row1);
-    add(QStringLiteral("1"), QStringLiteral("1"), '1', x0 + 44, row1);
-    add(QStringLiteral("2"), QStringLiteral("2"), '2', x0 + 88, row1);
-    add(QStringLiteral("3"), QStringLiteral("3"), '3', x0 + 132, row1);
-    add(QStringLiteral("4"), QStringLiteral("4"), '4', x0 + 176, row1);
+            add("tab", QStringLiteral("Tab"), VK_TAB, cursorX, r1, 56);
+            add("q", QStringLiteral("Q"), 'Q', cursorX + 62, r1);
+            add("w", QStringLiteral("W"), 'W', cursorX + 106, r1);
+            add("e", QStringLiteral("E"), 'E', cursorX + 150, r1);
+            add("r", QStringLiteral("R"), 'R', cursorX + 194, r1);
+            add("t", QStringLiteral("T"), 'T', cursorX + 238, r1);
+            add("y", QStringLiteral("Y"), 'Y', cursorX + 282, r1);
+            add("u", QStringLiteral("U"), 'U', cursorX + 326, r1);
+            add("i", QStringLiteral("I"), 'I', cursorX + 370, r1);
+            add("o", QStringLiteral("O"), 'O', cursorX + 414, r1);
+            add("p", QStringLiteral("P"), 'P', cursorX + 458, r1);
+            add("lbracket", QStringLiteral("["), VK_OEM_4, cursorX + 502, r1);
+            add("rbracket", QStringLiteral("]"), VK_OEM_6, cursorX + 546, r1);
+            add("backslash", QStringLiteral("\\"), VK_OEM_5, cursorX + 590, r1, 64);
 
-    const qreal row2 = row1 + key + gap;
-    add(QStringLiteral("tab"), QStringLiteral("Tab"), VK_TAB, x0, row2, 56);
-    add(QStringLiteral("q"), QStringLiteral("Q"), 'Q', x0 + 62, row2);
-    add(QStringLiteral("w"), QStringLiteral("W"), 'W', x0 + 106, row2);
-    add(QStringLiteral("e"), QStringLiteral("E"), 'E', x0 + 150, row2);
-    add(QStringLiteral("r"), QStringLiteral("R"), 'R', x0 + 194, row2);
+            add("caps", QStringLiteral("Caps"), VK_CAPITAL, cursorX, r2, 68);
+            add("a", QStringLiteral("A"), 'A', cursorX + 74, r2);
+            add("s", QStringLiteral("S"), 'S', cursorX + 118, r2);
+            add("d", QStringLiteral("D"), 'D', cursorX + 162, r2);
+            add("f", QStringLiteral("F"), 'F', cursorX + 206, r2);
+            add("g", QStringLiteral("G"), 'G', cursorX + 250, r2);
+            add("h", QStringLiteral("H"), 'H', cursorX + 294, r2);
+            add("j", QStringLiteral("J"), 'J', cursorX + 338, r2);
+            add("k", QStringLiteral("K"), 'K', cursorX + 382, r2);
+            add("l", QStringLiteral("L"), 'L', cursorX + 426, r2);
+            add("semicolon", QStringLiteral(";"), VK_OEM_1, cursorX + 470, r2);
+            add("quote", QStringLiteral("'"), VK_OEM_7, cursorX + 514, r2);
+            add("enter", QStringLiteral("Enter"), VK_RETURN, cursorX + 558, r2, 96);
 
-    const qreal row3 = row2 + key + gap;
-    add(QStringLiteral("caps"), QStringLiteral("Caps"), VK_CAPITAL, x0, row3, 62);
-    add(QStringLiteral("a"), QStringLiteral("A"), 'A', x0 + 68, row3);
-    add(QStringLiteral("s"), QStringLiteral("S"), 'S', x0 + 112, row3);
-    add(QStringLiteral("d"), QStringLiteral("D"), 'D', x0 + 156, row3);
-    add(QStringLiteral("f"), QStringLiteral("F"), 'F', x0 + 200, row3);
-    add(QStringLiteral("g"), QStringLiteral("G"), 'G', x0 + 244, row3);
+            add("shift", QStringLiteral("Shift"), VK_LSHIFT, cursorX, r3, 90);
+            add("z", QStringLiteral("Z"), 'Z', cursorX + 96, r3);
+            add("x", QStringLiteral("X"), 'X', cursorX + 140, r3);
+            add("c", QStringLiteral("C"), 'C', cursorX + 184, r3);
+            add("v", QStringLiteral("V"), 'V', cursorX + 228, r3);
+            add("b", QStringLiteral("B"), 'B', cursorX + 272, r3);
+            add("n", QStringLiteral("N"), 'N', cursorX + 316, r3);
+            add("m", QStringLiteral("M"), 'M', cursorX + 360, r3);
+            add("comma", QStringLiteral(","), VK_OEM_COMMA, cursorX + 404, r3);
+            add("period", QStringLiteral("."), VK_OEM_PERIOD, cursorX + 448, r3);
+            add("slash", QStringLiteral("/"), VK_OEM_2, cursorX + 492, r3);
+            add("rshift", QStringLiteral("Shift"), VK_RSHIFT, cursorX + 536, r3, 118);
 
-    const qreal row4 = row3 + key + gap;
-    add(QStringLiteral("shift"), QStringLiteral("Shift"), VK_LSHIFT, x0, row4, 82);
-    add(QStringLiteral("z"), QStringLiteral("Z"), 'Z', x0 + 88, row4);
-    add(QStringLiteral("x"), QStringLiteral("X"), 'X', x0 + 132, row4);
-    add(QStringLiteral("c"), QStringLiteral("C"), 'C', x0 + 176, row4);
-    add(QStringLiteral("v"), QStringLiteral("V"), 'V', x0 + 220, row4);
+            add("ctrl", QStringLiteral("Ctrl"), VK_LCONTROL, cursorX, r4, 58);
+            add("lwin", QStringLiteral("Win"), VK_LWIN, cursorX + 64, r4, 52);
+            add("alt", QStringLiteral("Alt"), VK_LMENU, cursorX + 122, r4, 52);
+            add("space", QStringLiteral("Space"), VK_SPACE, cursorX + 180, r4, 224);
+            add("ralt", QStringLiteral("Alt"), VK_RMENU, cursorX + 410, r4, 52);
+            add("rwin", QStringLiteral("Win"), VK_RWIN, cursorX + 468, r4, 52);
+            add("menu", QStringLiteral("Menu"), VK_APPS, cursorX + 526, r4, 62);
+            add("rctrl", QStringLiteral("Ctrl"), VK_RCONTROL, cursorX + 594, r4, 60);
+        }
 
-    const qreal row5 = row4 + key + gap;
-    add(QStringLiteral("ctrl"), QStringLiteral("Ctrl"), VK_LCONTROL, x0, row5, 56);
-    add(QStringLiteral("alt"), QStringLiteral("Alt"), VK_LMENU, x0 + 102, row5, 56);
-    add(QStringLiteral("space"), QStringLiteral("Space"), VK_SPACE, x0 + 164, row5, 220);
+        cursorX +=
+            mainColumnWidth +
+            sectionGap;
+    }
 
-    if (showArrowSection) {
-        const qreal arrowX = 414.0;
-        const qreal arrowTopY = row3 + 4.0;
-        const qreal arrowBottomY =
-            arrowTopY + key + gap;
+    if (navColumnWidth > 0.0) {
+        const qreal columnY =
+            baseHeight_ - pad - navColumnHeight;
 
-        add(
-            QStringLiteral("up"),
-            QStringLiteral("↑"),
-            VK_UP,
-            arrowX + 44.0,
-            arrowTopY);
-        add(
-            QStringLiteral("left"),
-            QStringLiteral("←"),
-            VK_LEFT,
-            arrowX,
-            arrowBottomY);
-        add(
-            QStringLiteral("down"),
-            QStringLiteral("↓"),
-            VK_DOWN,
-            arrowX + 44.0,
-            arrowBottomY);
-        add(
-            QStringLiteral("right"),
-            QStringLiteral("→"),
-            VK_RIGHT,
-            arrowX + 88.0,
-            arrowBottomY);
+        qreal navY = columnY;
+        if (navigationActive) {
+            add("insert", QStringLiteral("Ins"), VK_INSERT, cursorX, navY);
+            add("home", QStringLiteral("Home"), VK_HOME, cursorX + 44, navY);
+            add("pgup", QStringLiteral("PgUp"), VK_PRIOR, cursorX + 88, navY);
+
+            add("delete", QStringLiteral("Del"), VK_DELETE, cursorX, navY + 44);
+            add("end", QStringLiteral("End"), VK_END, cursorX + 44, navY + 44);
+            add("pgdn", QStringLiteral("PgDn"), VK_NEXT, cursorX + 88, navY + 44);
+
+            navY +=
+                navHeight +
+                (arrowsActive ? stackGap : 0.0);
+        }
+
+        if (arrowsActive) {
+            add("up", QStringLiteral("↑"), VK_UP, cursorX + 44, navY);
+            add("left", QStringLiteral("←"), VK_LEFT, cursorX, navY + 44);
+            add("down", QStringLiteral("↓"), VK_DOWN, cursorX + 44, navY + 44);
+            add("right", QStringLiteral("→"), VK_RIGHT, cursorX + 88, navY + 44);
+        }
+
+        cursorX +=
+            navColumnWidth +
+            sectionGap;
+    }
+
+    if (numpadColumnWidth > 0.0) {
+        const qreal y =
+            baseHeight_ - pad - numpadHeight;
+
+        add("numlock", QStringLiteral("Num"), VK_NUMLOCK, cursorX, y);
+        add("numdivide", QStringLiteral("/"), VK_DIVIDE, cursorX + 44, y);
+        add("nummultiply", QStringLiteral("*"), VK_MULTIPLY, cursorX + 88, y);
+        add("numminus", QStringLiteral("-"), VK_SUBTRACT, cursorX + 132, y);
+
+        add("num7", QStringLiteral("7"), VK_NUMPAD7, cursorX, y + 44);
+        add("num8", QStringLiteral("8"), VK_NUMPAD8, cursorX + 44, y + 44);
+        add("num9", QStringLiteral("9"), VK_NUMPAD9, cursorX + 88, y + 44);
+        add("numplus", QStringLiteral("+"), VK_ADD, cursorX + 132, y + 44, key, 82);
+
+        add("num4", QStringLiteral("4"), VK_NUMPAD4, cursorX, y + 88);
+        add("num5", QStringLiteral("5"), VK_NUMPAD5, cursorX + 44, y + 88);
+        add("num6", QStringLiteral("6"), VK_NUMPAD6, cursorX + 88, y + 88);
+
+        add("num1", QStringLiteral("1"), VK_NUMPAD1, cursorX, y + 132);
+        add("num2", QStringLiteral("2"), VK_NUMPAD2, cursorX + 44, y + 132);
+        add("num3", QStringLiteral("3"), VK_NUMPAD3, cursorX + 88, y + 132);
+        add("numenter", QStringLiteral("Ent"), VK_RETURN, cursorX + 132, y + 132, key, 82);
+
+        add("num0", QStringLiteral("0"), VK_NUMPAD0, cursorX, y + 176, 82);
+        add("numdecimal", QStringLiteral("."), VK_DECIMAL, cursorX + 88, y + 176);
+
+        cursorX +=
+            numpadColumnWidth +
+            sectionGap;
+    }
+
+    if (mouseActive) {
+        mouseBaseX_ = cursorX;
+    } else {
+        mouseBaseX_ = -1000.0;
     }
 }
-
 void ClatashaInputHudWindow::positionHud()
 {
     QScreen *screen =
@@ -513,6 +716,9 @@ void ClatashaInputHudWindow::drawKey(
 
 void ClatashaInputHudWindow::drawMouse(QPainter &p)
 {
+    if (mouseControls_ == 0)
+        return;
+
     const QRectF area(
         mouseBaseX_,
         18.0,
