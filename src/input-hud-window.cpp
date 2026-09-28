@@ -285,6 +285,7 @@ void ClatashaInputHudWindow::setScalePercent(int value)
         std::clamp(value, 60, 160);
     rebuildLayout();
     positionHud();
+    refreshRenderedFrame();
     update();
 }
 
@@ -293,6 +294,7 @@ void ClatashaInputHudWindow::setSelectedKeyIds(
 {
     selectedKeyIds_ = ids;
     rebuildLayout();
+    refreshRenderedFrame();
     update();
 }
 
@@ -1325,6 +1327,7 @@ void ClatashaInputHudWindow::handleMouseWheel(int delta)
         delta > 0 ? 1 : -1;
     wheelFlashStartMs_ =
         wheelClock_.elapsed();
+    refreshRenderedFrame();
     update();
 }
 #endif
