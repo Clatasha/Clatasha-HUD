@@ -2110,17 +2110,30 @@ void inputHudSourceRender(
     }
 }
 
-obs_source_info inputHudSourceInfo = {
-    .id = kInputHudSourceId,
-    .type = OBS_SOURCE_TYPE_INPUT,
-    .output_flags = OBS_SOURCE_VIDEO,
-    .get_name = inputHudSourceGetName,
-    .create = inputHudSourceCreate,
-    .destroy = inputHudSourceDestroy,
-    .get_width = inputHudSourceWidth,
-    .get_height = inputHudSourceHeight,
-    .video_render = inputHudSourceRender,
-};
+obs_source_info makeInputHudSourceInfo()
+{
+    obs_source_info info{};
+    info.id = kInputHudSourceId;
+    info.type = OBS_SOURCE_TYPE_INPUT;
+    info.output_flags =
+        OBS_SOURCE_VIDEO;
+    info.get_name =
+        inputHudSourceGetName;
+    info.create =
+        inputHudSourceCreate;
+    info.destroy =
+        inputHudSourceDestroy;
+    info.get_width =
+        inputHudSourceWidth;
+    info.get_height =
+        inputHudSourceHeight;
+    info.video_render =
+        inputHudSourceRender;
+    return info;
+}
+
+obs_source_info inputHudSourceInfo =
+    makeInputHudSourceInfo();
 
 bool applyInputHudVideoSource()
 {
