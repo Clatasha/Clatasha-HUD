@@ -195,13 +195,15 @@ void ClatashaInputHudWindow::loadSettings()
                         QLatin1Char(',')))
             .toString();
 
-    selectedKeyIds_ =
-        storedKeys.split(
-            QLatin1Char(','),
-            Qt::SkipEmptyParts);
-
-    if (selectedKeyIds_.isEmpty())
-        selectedKeyIds_ = fpsDefaultKeyIds();
+    if (storedKeys ==
+        QStringLiteral("__none__")) {
+        selectedKeyIds_.clear();
+    } else {
+        selectedKeyIds_ =
+            storedKeys.split(
+                QLatin1Char(','),
+                Qt::SkipEmptyParts);
+    }
 
     mouseControls_ =
         settings.value(
@@ -233,8 +235,10 @@ void ClatashaInputHudWindow::saveSettings() const
         scalePercent_);
     settings.setValue(
         QStringLiteral("inputHud/selectedKeys"),
-        selectedKeyIds_.join(
-            QLatin1Char(',')));
+        selectedKeyIds_.isEmpty()
+            ? QStringLiteral("__none__")
+            : selectedKeyIds_.join(
+                  QLatin1Char(',')));
     settings.setValue(
         QStringLiteral("inputHud/mouseControls"),
         mouseControls_);
@@ -273,9 +277,6 @@ void ClatashaInputHudWindow::setSelectedKeyIds(
     const QStringList &ids)
 {
     selectedKeyIds_ = ids;
-    if (selectedKeyIds_.isEmpty())
-        selectedKeyIds_ = fpsDefaultKeyIds();
-
     rebuildLayout();
     update();
 }
