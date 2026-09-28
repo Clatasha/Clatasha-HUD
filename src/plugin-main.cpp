@@ -23,6 +23,7 @@
 #include <QFrame>
 #include <QGroupBox>
 #include <QGridLayout>
+#include <QHash>
 #include <QGuiApplication>
 #include <QImage>
 #include <QIcon>
@@ -4108,91 +4109,769 @@ static void show_settings()
 
             auto *keyboardGroup =
                 new QGroupBox(
-                    QStringLiteral("Keyboard"),
+                    QStringLiteral("Keyboard Layout"),
                     editorBody);
-            auto *keyboardGrid =
-                new QGridLayout(keyboardGroup);
-            keyboardGrid->setContentsMargins(
+            auto *keyboardLayout =
+                new QVBoxLayout(keyboardGroup);
+            keyboardLayout->setContentsMargins(
                 14,
                 20,
                 14,
                 14);
-            keyboardGrid->setHorizontalSpacing(
-                14);
-            keyboardGrid->setVerticalSpacing(
-                8);
+            keyboardLayout->setSpacing(12);
 
-            struct InputKeyChoice {
-                const char *id;
-                const char *label;
+            QHash<QString, QPushButton *>
+                keyButtons;
+            QHash<quint32, QPushButton *>
+                mouseButtons;
+
+            const QString keycapStyle =
+                QStringLiteral(
+                    "QPushButton[keycap='true'] {"
+                    " background:#11171e;"
+                    " color:#dce8f2;"
+                    " border:1px solid #43505d;"
+                    " border-radius:6px;"
+                    " padding:5px 7px;"
+                    " font-weight:600;"
+                    " min-height:26px;"
+                    "}"
+                    "QPushButton[keycap='true']:hover {"
+                    " background:#182632;"
+                    " border-color:#62809a;"
+                    "}"
+                    "QPushButton[keycap='true']:checked {"
+                    " background:#008fd5;"
+                    " color:white;"
+                    " border:1px solid #66d8ff;"
+                    "}"
+                    "QPushButton[keycap='true']:checked:hover {"
+                    " background:#00a4ef;"
+                    "}");
+
+            auto makeKeycap =
+                [&](QWidget *parentWidget,
+                    const QString &id,
+                    const QString &label,
+                    int width = 40) {
+                    auto *button =
+                        new QPushButton(
+                            label,
+                            parentWidget);
+                    button->setCheckable(true);
+                    button->setChecked(
+                        inputKeyIds.contains(
+                            id,
+                            Qt::CaseInsensitive));
+                    button->setProperty(
+                        "keycap",
+                        true);
+                    button->setStyleSheet(
+                        keycapStyle);
+                    button->setFixedWidth(width);
+                    button->setCursor(
+                        Qt::PointingHandCursor);
+                    keyButtons.insert(
+                        id,
+                        button);
+                    return button;
+                };
+
+            auto addSectionControls =
+                [&](QVBoxLayout *layout,
+                    QWidget *parentWidget,
+                    const QStringList &ids) {
+                    auto *row =
+                        new QHBoxLayout();
+                    auto *all =
+                        new QPushButton(
+                            QStringLiteral("All"),
+                            parentWidget);
+                    auto *none =
+                        new QPushButton(
+                            QStringLiteral("None"),
+                            parentWidget);
+                    all->setMaximumWidth(58);
+                    none->setMaximumWidth(58);
+                    row->addStretch();
+                    row->addWidget(all);
+                    row->addWidget(none);
+                    layout->addLayout(row);
+
+                    QObject::connect(
+                        all,
+                        &QPushButton::clicked,
+                        &editor,
+                        [&, ids]() {
+                            for (const QString &id :
+                                 ids) {
+                                if (auto *button =
+                                        keyButtons.value(id)) {
+                                    button->setChecked(true);
+                                }
+                            }
+                        });
+
+                    QObject::connect(
+                        none,
+                        &QPushButton::clicked,
+                        &editor,
+                        [&, ids]() {
+                            for (const QString &id :
+                                 ids) {
+                                if (auto *button =
+                                        keyButtons.value(id)) {
+                                    button->setChecked(false);
+                                }
+                            }
+                        });
+                };
+
+            // Function section.
+            auto *functionGroup =
+                new QGroupBox(
+                    QStringLiteral("Function"),
+                    keyboardGroup);
+            auto *functionLayout =
+                new QVBoxLayout(functionGroup);
+            functionLayout->setContentsMargins(
+                10,
+                18,
+                10,
+                10);
+
+            auto *functionRow =
+                new QHBoxLayout();
+            functionRow->setSpacing(5);
+            functionRow->addWidget(
+                makeKeycap(
+                    functionGroup,
+                    QStringLiteral("esc"),
+                    QStringLiteral("Esc"),
+                    46));
+            functionRow->addSpacing(12);
+
+            const QStringList functionIds{
+                QStringLiteral("esc"),
+                QStringLiteral("f1"),
+                QStringLiteral("f2"),
+                QStringLiteral("f3"),
+                QStringLiteral("f4"),
+                QStringLiteral("f5"),
+                QStringLiteral("f6"),
+                QStringLiteral("f7"),
+                QStringLiteral("f8"),
+                QStringLiteral("f9"),
+                QStringLiteral("f10"),
+                QStringLiteral("f11"),
+                QStringLiteral("f12"),
             };
 
-            const std::array<InputKeyChoice, 30>
-                inputKeyChoices{{
-                    {"esc", "Esc"},
-                    {"f1", "F1"},
-                    {"tilde", "~"},
-                    {"1", "1"},
-                    {"2", "2"},
-                    {"3", "3"},
-                    {"4", "4"},
-                    {"tab", "Tab"},
-                    {"q", "Q"},
-                    {"w", "W"},
-                    {"e", "E"},
-                    {"r", "R"},
-                    {"caps", "Caps"},
-                    {"a", "A"},
-                    {"s", "S"},
-                    {"d", "D"},
-                    {"f", "F"},
-                    {"g", "G"},
-                    {"shift", "Shift"},
-                    {"z", "Z"},
-                    {"x", "X"},
-                    {"c", "C"},
-                    {"v", "V"},
-                    {"ctrl", "Ctrl"},
-                    {"alt", "Alt"},
-                    {"space", "Space"},
-                    {"up", "↑  Up"},
-                    {"left", "←  Left"},
-                    {"down", "↓  Down"},
-                    {"right", "→  Right"},
+            for (int i = 1; i <= 12; ++i) {
+                functionRow->addWidget(
+                    makeKeycap(
+                        functionGroup,
+                        QStringLiteral("f%1")
+                            .arg(i),
+                        QStringLiteral("F%1")
+                            .arg(i),
+                        40));
+
+                if (i == 4 || i == 8)
+                    functionRow->addSpacing(10);
+            }
+            functionRow->addStretch();
+            functionLayout->addLayout(
+                functionRow);
+            addSectionControls(
+                functionLayout,
+                functionGroup,
+                functionIds);
+
+            // Main typing/game section.
+            auto *mainGroup =
+                new QGroupBox(
+                    QStringLiteral("Main Keyboard"),
+                    keyboardGroup);
+            auto *mainLayout =
+                new QVBoxLayout(mainGroup);
+            mainLayout->setContentsMargins(
+                10,
+                18,
+                10,
+                10);
+            mainLayout->setSpacing(5);
+
+            const QStringList mainIds{
+                QStringLiteral("tilde"),
+                QStringLiteral("1"),
+                QStringLiteral("2"),
+                QStringLiteral("3"),
+                QStringLiteral("4"),
+                QStringLiteral("5"),
+                QStringLiteral("6"),
+                QStringLiteral("7"),
+                QStringLiteral("8"),
+                QStringLiteral("9"),
+                QStringLiteral("0"),
+                QStringLiteral("minus"),
+                QStringLiteral("equals"),
+                QStringLiteral("backspace"),
+                QStringLiteral("tab"),
+                QStringLiteral("q"),
+                QStringLiteral("w"),
+                QStringLiteral("e"),
+                QStringLiteral("r"),
+                QStringLiteral("t"),
+                QStringLiteral("y"),
+                QStringLiteral("u"),
+                QStringLiteral("i"),
+                QStringLiteral("o"),
+                QStringLiteral("p"),
+                QStringLiteral("lbracket"),
+                QStringLiteral("rbracket"),
+                QStringLiteral("backslash"),
+                QStringLiteral("caps"),
+                QStringLiteral("a"),
+                QStringLiteral("s"),
+                QStringLiteral("d"),
+                QStringLiteral("f"),
+                QStringLiteral("g"),
+                QStringLiteral("h"),
+                QStringLiteral("j"),
+                QStringLiteral("k"),
+                QStringLiteral("l"),
+                QStringLiteral("semicolon"),
+                QStringLiteral("quote"),
+                QStringLiteral("enter"),
+                QStringLiteral("shift"),
+                QStringLiteral("z"),
+                QStringLiteral("x"),
+                QStringLiteral("c"),
+                QStringLiteral("v"),
+                QStringLiteral("b"),
+                QStringLiteral("n"),
+                QStringLiteral("m"),
+                QStringLiteral("comma"),
+                QStringLiteral("period"),
+                QStringLiteral("slash"),
+                QStringLiteral("rshift"),
+                QStringLiteral("ctrl"),
+                QStringLiteral("lwin"),
+                QStringLiteral("alt"),
+                QStringLiteral("space"),
+                QStringLiteral("ralt"),
+                QStringLiteral("rwin"),
+                QStringLiteral("menu"),
+                QStringLiteral("rctrl"),
+            };
+
+            auto addKeyRow =
+                [&](std::initializer_list<
+                        std::tuple<
+                            const char *,
+                            const char *,
+                            int>> defs) {
+                    auto *row =
+                        new QHBoxLayout();
+                    row->setSpacing(5);
+
+                    for (const auto &def :
+                         defs) {
+                        row->addWidget(
+                            makeKeycap(
+                                mainGroup,
+                                QString::fromLatin1(
+                                    std::get<0>(def)),
+                                QString::fromUtf8(
+                                    std::get<1>(def)),
+                                std::get<2>(def)));
+                    }
+                    row->addStretch();
+                    mainLayout->addLayout(row);
+                };
+
+            addKeyRow({
+                {"tilde", "~", 40},
+                {"1", "1", 40},
+                {"2", "2", 40},
+                {"3", "3", 40},
+                {"4", "4", 40},
+                {"5", "5", 40},
+                {"6", "6", 40},
+                {"7", "7", 40},
+                {"8", "8", 40},
+                {"9", "9", 40},
+                {"0", "0", 40},
+                {"minus", "-", 40},
+                {"equals", "=", 40},
+                {"backspace", "Backspace", 84},
+            });
+
+            addKeyRow({
+                {"tab", "Tab", 58},
+                {"q", "Q", 40},
+                {"w", "W", 40},
+                {"e", "E", 40},
+                {"r", "R", 40},
+                {"t", "T", 40},
+                {"y", "Y", 40},
+                {"u", "U", 40},
+                {"i", "I", 40},
+                {"o", "O", 40},
+                {"p", "P", 40},
+                {"lbracket", "[", 40},
+                {"rbracket", "]", 40},
+                {"backslash", "\\", 62},
+            });
+
+            addKeyRow({
+                {"caps", "Caps", 68},
+                {"a", "A", 40},
+                {"s", "S", 40},
+                {"d", "D", 40},
+                {"f", "F", 40},
+                {"g", "G", 40},
+                {"h", "H", 40},
+                {"j", "J", 40},
+                {"k", "K", 40},
+                {"l", "L", 40},
+                {"semicolon", ";", 40},
+                {"quote", "'", 40},
+                {"enter", "Enter", 92},
+            });
+
+            addKeyRow({
+                {"shift", "Shift", 88},
+                {"z", "Z", 40},
+                {"x", "X", 40},
+                {"c", "C", 40},
+                {"v", "V", 40},
+                {"b", "B", 40},
+                {"n", "N", 40},
+                {"m", "M", 40},
+                {"comma", ",", 40},
+                {"period", ".", 40},
+                {"slash", "/", 40},
+                {"rshift", "Shift", 112},
+            });
+
+            addKeyRow({
+                {"ctrl", "Ctrl", 58},
+                {"lwin", "Win", 52},
+                {"alt", "Alt", 52},
+                {"space", "Space", 222},
+                {"ralt", "Alt", 52},
+                {"rwin", "Win", 52},
+                {"menu", "Menu", 62},
+                {"rctrl", "Ctrl", 58},
+            });
+
+            addSectionControls(
+                mainLayout,
+                mainGroup,
+                mainIds);
+
+            // Navigation and arrow sections.
+            auto *navigationGroup =
+                new QGroupBox(
+                    QStringLiteral("Navigation + Arrows"),
+                    keyboardGroup);
+            auto *navigationLayout =
+                new QHBoxLayout(navigationGroup);
+            navigationLayout->setContentsMargins(
+                10,
+                18,
+                10,
+                10);
+            navigationLayout->setSpacing(18);
+
+            const QStringList navigationIds{
+                QStringLiteral("insert"),
+                QStringLiteral("home"),
+                QStringLiteral("pgup"),
+                QStringLiteral("delete"),
+                QStringLiteral("end"),
+                QStringLiteral("pgdn"),
+            };
+            const QStringList arrowIds{
+                QStringLiteral("up"),
+                QStringLiteral("left"),
+                QStringLiteral("down"),
+                QStringLiteral("right"),
+            };
+
+            auto *navWrap =
+                new QWidget(navigationGroup);
+            auto *navWrapLayout =
+                new QVBoxLayout(navWrap);
+            navWrapLayout->setContentsMargins(
+                0,
+                0,
+                0,
+                0);
+            navWrapLayout->setSpacing(5);
+
+            auto *navRow1 =
+                new QHBoxLayout();
+            navRow1->setSpacing(5);
+            navRow1->addWidget(
+                makeKeycap(
+                    navWrap,
+                    QStringLiteral("insert"),
+                    QStringLiteral("Ins")));
+            navRow1->addWidget(
+                makeKeycap(
+                    navWrap,
+                    QStringLiteral("home"),
+                    QStringLiteral("Home"),
+                    48));
+            navRow1->addWidget(
+                makeKeycap(
+                    navWrap,
+                    QStringLiteral("pgup"),
+                    QStringLiteral("PgUp"),
+                    48));
+            navWrapLayout->addLayout(navRow1);
+
+            auto *navRow2 =
+                new QHBoxLayout();
+            navRow2->setSpacing(5);
+            navRow2->addWidget(
+                makeKeycap(
+                    navWrap,
+                    QStringLiteral("delete"),
+                    QStringLiteral("Del")));
+            navRow2->addWidget(
+                makeKeycap(
+                    navWrap,
+                    QStringLiteral("end"),
+                    QStringLiteral("End"),
+                    48));
+            navRow2->addWidget(
+                makeKeycap(
+                    navWrap,
+                    QStringLiteral("pgdn"),
+                    QStringLiteral("PgDn"),
+                    48));
+            navWrapLayout->addLayout(navRow2);
+
+            auto *arrowWrap =
+                new QWidget(navigationGroup);
+            auto *arrowGrid =
+                new QGridLayout(arrowWrap);
+            arrowGrid->setContentsMargins(
+                0,
+                0,
+                0,
+                0);
+            arrowGrid->setSpacing(5);
+
+            arrowGrid->addWidget(
+                makeKeycap(
+                    arrowWrap,
+                    QStringLiteral("up"),
+                    QStringLiteral("↑")),
+                0,
+                1);
+            arrowGrid->addWidget(
+                makeKeycap(
+                    arrowWrap,
+                    QStringLiteral("left"),
+                    QStringLiteral("←")),
+                1,
+                0);
+            arrowGrid->addWidget(
+                makeKeycap(
+                    arrowWrap,
+                    QStringLiteral("down"),
+                    QStringLiteral("↓")),
+                1,
+                1);
+            arrowGrid->addWidget(
+                makeKeycap(
+                    arrowWrap,
+                    QStringLiteral("right"),
+                    QStringLiteral("→")),
+                1,
+                2);
+
+            auto *navColumn =
+                new QVBoxLayout();
+            auto *navLabel =
+                new QLabel(
+                    QStringLiteral("Navigation"),
+                    navigationGroup);
+            navLabel->setProperty(
+                "muted",
+                true);
+            navColumn->addWidget(navLabel);
+            navColumn->addWidget(navWrap);
+
+            auto *navControls =
+                new QHBoxLayout();
+            auto *navAll =
+                new QPushButton(
+                    QStringLiteral("All"),
+                    navigationGroup);
+            auto *navNone =
+                new QPushButton(
+                    QStringLiteral("None"),
+                    navigationGroup);
+            navControls->addStretch();
+            navControls->addWidget(navAll);
+            navControls->addWidget(navNone);
+            navColumn->addLayout(navControls);
+
+            auto *arrowColumn =
+                new QVBoxLayout();
+            auto *arrowLabel =
+                new QLabel(
+                    QStringLiteral("Arrow Keys"),
+                    navigationGroup);
+            arrowLabel->setProperty(
+                "muted",
+                true);
+            arrowColumn->addWidget(arrowLabel);
+            arrowColumn->addWidget(arrowWrap);
+
+            auto *arrowControls =
+                new QHBoxLayout();
+            auto *arrowAll =
+                new QPushButton(
+                    QStringLiteral("All"),
+                    navigationGroup);
+            auto *arrowNone =
+                new QPushButton(
+                    QStringLiteral("None"),
+                    navigationGroup);
+            arrowControls->addStretch();
+            arrowControls->addWidget(arrowAll);
+            arrowControls->addWidget(arrowNone);
+            arrowColumn->addLayout(arrowControls);
+
+            navigationLayout->addLayout(
+                navColumn);
+            navigationLayout->addLayout(
+                arrowColumn);
+            navigationLayout->addStretch();
+
+            auto toggleIds =
+                [&](const QStringList &ids,
+                    bool checked) {
+                    for (const QString &id : ids) {
+                        if (auto *button =
+                                keyButtons.value(id)) {
+                            button->setChecked(
+                                checked);
+                        }
+                    }
+                };
+
+            QObject::connect(
+                navAll,
+                &QPushButton::clicked,
+                &editor,
+                [&, navigationIds]() {
+                    toggleIds(
+                        navigationIds,
+                        true);
+                });
+            QObject::connect(
+                navNone,
+                &QPushButton::clicked,
+                &editor,
+                [&, navigationIds]() {
+                    toggleIds(
+                        navigationIds,
+                        false);
+                });
+            QObject::connect(
+                arrowAll,
+                &QPushButton::clicked,
+                &editor,
+                [&, arrowIds]() {
+                    toggleIds(
+                        arrowIds,
+                        true);
+                });
+            QObject::connect(
+                arrowNone,
+                &QPushButton::clicked,
+                &editor,
+                [&, arrowIds]() {
+                    toggleIds(
+                        arrowIds,
+                        false);
+                });
+
+            // Numpad section.
+            auto *numpadGroup =
+                new QGroupBox(
+                    QStringLiteral("Numpad"),
+                    keyboardGroup);
+            auto *numpadGrid =
+                new QGridLayout(numpadGroup);
+            numpadGrid->setContentsMargins(
+                10,
+                18,
+                10,
+                10);
+            numpadGrid->setSpacing(5);
+
+            const QStringList numpadIds{
+                QStringLiteral("numlock"),
+                QStringLiteral("numdivide"),
+                QStringLiteral("nummultiply"),
+                QStringLiteral("numminus"),
+                QStringLiteral("num7"),
+                QStringLiteral("num8"),
+                QStringLiteral("num9"),
+                QStringLiteral("numplus"),
+                QStringLiteral("num4"),
+                QStringLiteral("num5"),
+                QStringLiteral("num6"),
+                QStringLiteral("num1"),
+                QStringLiteral("num2"),
+                QStringLiteral("num3"),
+                QStringLiteral("numenter"),
+                QStringLiteral("num0"),
+                QStringLiteral("numdecimal"),
+            };
+
+            numpadGrid->addWidget(
+                makeKeycap(
+                    numpadGroup,
+                    QStringLiteral("numlock"),
+                    QStringLiteral("Num"),
+                    46),
+                0, 0);
+            numpadGrid->addWidget(
+                makeKeycap(
+                    numpadGroup,
+                    QStringLiteral("numdivide"),
+                    QStringLiteral("/")),
+                0, 1);
+            numpadGrid->addWidget(
+                makeKeycap(
+                    numpadGroup,
+                    QStringLiteral("nummultiply"),
+                    QStringLiteral("*")),
+                0, 2);
+            numpadGrid->addWidget(
+                makeKeycap(
+                    numpadGroup,
+                    QStringLiteral("numminus"),
+                    QStringLiteral("-")),
+                0, 3);
+
+            const std::array<std::tuple<const char *, const char *, int, int>, 9>
+                numDigits{{
+                    {"num7","7",1,0},
+                    {"num8","8",1,1},
+                    {"num9","9",1,2},
+                    {"num4","4",2,0},
+                    {"num5","5",2,1},
+                    {"num6","6",2,2},
+                    {"num1","1",3,0},
+                    {"num2","2",3,1},
+                    {"num3","3",3,2},
                 }};
 
-            std::array<QCheckBox *, 30>
-                keyChecks{};
-
-            for (size_t i = 0;
-                 i < inputKeyChoices.size();
-                 ++i) {
-                const auto &choice =
-                    inputKeyChoices[i];
-
-                auto *check =
-                    new QCheckBox(
+            for (const auto &def : numDigits) {
+                numpadGrid->addWidget(
+                    makeKeycap(
+                        numpadGroup,
+                        QString::fromLatin1(
+                            std::get<0>(def)),
                         QString::fromUtf8(
-                            choice.label),
-                        keyboardGroup);
-                check->setChecked(
-                    inputKeyIds.contains(
-                        QString::fromUtf8(
-                            choice.id),
-                        Qt::CaseInsensitive));
-
-                keyChecks[i] = check;
-                keyboardGrid->addWidget(
-                    check,
-                    static_cast<int>(i / 4),
-                    static_cast<int>(i % 4));
+                            std::get<1>(def))),
+                    std::get<2>(def),
+                    std::get<3>(def));
             }
+
+            numpadGrid->addWidget(
+                makeKeycap(
+                    numpadGroup,
+                    QStringLiteral("numplus"),
+                    QStringLiteral("+")),
+                1, 3, 2, 1);
+            numpadGrid->addWidget(
+                makeKeycap(
+                    numpadGroup,
+                    QStringLiteral("numenter"),
+                    QStringLiteral("Enter"),
+                    46),
+                3, 3, 2, 1);
+            numpadGrid->addWidget(
+                makeKeycap(
+                    numpadGroup,
+                    QStringLiteral("num0"),
+                    QStringLiteral("0"),
+                    86),
+                4, 0, 1, 2);
+            numpadGrid->addWidget(
+                makeKeycap(
+                    numpadGroup,
+                    QStringLiteral("numdecimal"),
+                    QStringLiteral(".")),
+                4, 2);
+
+            auto *numpadControls =
+                new QHBoxLayout();
+            auto *numpadAll =
+                new QPushButton(
+                    QStringLiteral("All"),
+                    numpadGroup);
+            auto *numpadNone =
+                new QPushButton(
+                    QStringLiteral("None"),
+                    numpadGroup);
+            numpadControls->addStretch();
+            numpadControls->addWidget(
+                numpadAll);
+            numpadControls->addWidget(
+                numpadNone);
+            numpadGrid->addLayout(
+                numpadControls,
+                5,
+                0,
+                1,
+                4);
+
+            QObject::connect(
+                numpadAll,
+                &QPushButton::clicked,
+                &editor,
+                [&, numpadIds]() {
+                    toggleIds(
+                        numpadIds,
+                        true);
+                });
+            QObject::connect(
+                numpadNone,
+                &QPushButton::clicked,
+                &editor,
+                [&, numpadIds]() {
+                    toggleIds(
+                        numpadIds,
+                        false);
+                });
+
+            keyboardLayout->addWidget(
+                functionGroup);
+            keyboardLayout->addWidget(
+                mainGroup);
+            keyboardLayout->addWidget(
+                navigationGroup);
+            keyboardLayout->addWidget(
+                numpadGroup);
 
             auto *keyboardButtons =
                 new QHBoxLayout();
             auto *selectAllKeys =
                 new QPushButton(
-                    QStringLiteral("Select All"),
+                    QStringLiteral("Select Full Keyboard"),
                     keyboardGroup);
             auto *clearKeys =
                 new QPushButton(
@@ -4203,23 +4882,18 @@ static void show_settings()
             keyboardButtons->addWidget(
                 clearKeys);
             keyboardButtons->addStretch();
-
-            keyboardGrid->addLayout(
-                keyboardButtons,
-                7,
-                0,
-                1,
-                4);
+            keyboardLayout->addLayout(
+                keyboardButtons);
 
             QObject::connect(
                 selectAllKeys,
                 &QPushButton::clicked,
                 &editor,
                 [&]() {
-                    for (QCheckBox *check :
-                         keyChecks) {
-                        if (check)
-                            check->setChecked(true);
+                    for (QPushButton *button :
+                         keyButtons) {
+                        if (button)
+                            button->setChecked(true);
                     }
                 });
 
@@ -4228,13 +4902,14 @@ static void show_settings()
                 &QPushButton::clicked,
                 &editor,
                 [&]() {
-                    for (QCheckBox *check :
-                         keyChecks) {
-                        if (check)
-                            check->setChecked(false);
+                    for (QPushButton *button :
+                         keyButtons) {
+                        if (button)
+                            button->setChecked(false);
                     }
                 });
 
+            // Mouse section uses the same selectable-key visual language.
             auto *mouseGroup =
                 new QGroupBox(
                     QStringLiteral("Mouse"),
@@ -4259,12 +4934,9 @@ static void show_settings()
                     {ClatashaInputHudWindow::MouseRight, "Right Click"},
                     {ClatashaInputHudWindow::MouseMiddle, "Middle Click"},
                     {ClatashaInputHudWindow::MouseWheel, "Scroll Up / Down"},
-                    {ClatashaInputHudWindow::MouseFront, "Front Side Button"},
-                    {ClatashaInputHudWindow::MouseBack, "Rear Side Button"},
+                    {ClatashaInputHudWindow::MouseFront, "Front Side"},
+                    {ClatashaInputHudWindow::MouseBack, "Rear Side"},
                 }};
-
-            std::array<QCheckBox *, 6>
-                mouseChecks{};
 
             for (size_t i = 0;
                  i < mouseChoices.size();
@@ -4272,20 +4944,30 @@ static void show_settings()
                 const auto &choice =
                     mouseChoices[i];
 
-                auto *check =
-                    new QCheckBox(
+                auto *button =
+                    new QPushButton(
                         QString::fromUtf8(
                             choice.label),
                         mouseGroup);
-                check->setChecked(
+                button->setCheckable(true);
+                button->setChecked(
                     (inputMouseControls &
                      choice.bit) != 0);
-                mouseChecks[i] = check;
+                button->setProperty(
+                    "keycap",
+                    true);
+                button->setStyleSheet(
+                    keycapStyle);
+                button->setCursor(
+                    Qt::PointingHandCursor);
+                mouseButtons.insert(
+                    choice.bit,
+                    button);
 
                 mouseGrid->addWidget(
-                    check,
-                    static_cast<int>(i / 2),
-                    static_cast<int>(i % 2));
+                    button,
+                    static_cast<int>(i / 3),
+                    static_cast<int>(i % 3));
             }
 
             auto *resetPreset =
@@ -4302,23 +4984,22 @@ static void show_settings()
                         ClatashaInputHudWindow::
                             fpsDefaultKeyIds();
 
-                    for (size_t i = 0;
-                         i < inputKeyChoices.size();
-                         ++i) {
-                        if (!keyChecks[i])
-                            continue;
-
-                        keyChecks[i]->setChecked(
-                            defaults.contains(
-                                QString::fromUtf8(
-                                    inputKeyChoices[i].id),
-                                Qt::CaseInsensitive));
+                    for (auto it =
+                             keyButtons.begin();
+                         it != keyButtons.end();
+                         ++it) {
+                        if (it.value()) {
+                            it.value()->setChecked(
+                                defaults.contains(
+                                    it.key(),
+                                    Qt::CaseInsensitive));
+                        }
                     }
 
-                    for (QCheckBox *check :
-                         mouseChecks) {
-                        if (check)
-                            check->setChecked(true);
+                    for (QPushButton *button :
+                         mouseButtons) {
+                        if (button)
+                            button->setChecked(true);
                     }
                 });
 
@@ -4363,25 +5044,26 @@ static void show_settings()
             }
 
             inputKeyIds.clear();
-            for (size_t i = 0;
-                 i < inputKeyChoices.size();
-                 ++i) {
-                if (keyChecks[i] &&
-                    keyChecks[i]->isChecked()) {
+            for (auto it =
+                     keyButtons.cbegin();
+                 it != keyButtons.cend();
+                 ++it) {
+                if (it.value() &&
+                    it.value()->isChecked()) {
                     inputKeyIds.push_back(
-                        QString::fromUtf8(
-                            inputKeyChoices[i].id));
+                        it.key());
                 }
             }
 
             inputMouseControls = 0;
-            for (size_t i = 0;
-                 i < mouseChoices.size();
-                 ++i) {
-                if (mouseChecks[i] &&
-                    mouseChecks[i]->isChecked()) {
+            for (auto it =
+                     mouseButtons.cbegin();
+                 it != mouseButtons.cend();
+                 ++it) {
+                if (it.value() &&
+                    it.value()->isChecked()) {
                     inputMouseControls |=
-                        mouseChoices[i].bit;
+                        it.key();
                 }
             }
 
