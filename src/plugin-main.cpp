@@ -2030,7 +2030,9 @@ void inputHudSourceRender(
 
     if (!context ||
         !g_inputHud ||
-        !g_inputHud->enabled()) {
+        !g_inputHud->enabled() ||
+        !g_inputHud->shown() ||
+        g_inputHud->outputMode() == 0) {
         return;
     }
 
@@ -2040,10 +2042,10 @@ void inputHudSourceRender(
         return;
 
     if (frame.format() !=
-        QImage::Format_ARGB32_Premultiplied) {
+        QImage::Format_ARGB32) {
         frame =
             frame.convertToFormat(
-                QImage::Format_ARGB32_Premultiplied);
+                QImage::Format_ARGB32);
     }
 
     const uint32_t width =
@@ -2093,21 +2095,13 @@ void inputHudSourceRender(
     if (!context->texture)
         return;
 
-    gs_effect_t *effect =
-        obs_get_base_effect(
-            OBS_EFFECT_PREMULTIPLIED_ALPHA);
-
-    while (gs_effect_loop(
-        effect,
-        "Draw")) {
-        obs_source_draw(
-            context->texture,
-            0,
-            0,
-            width,
-            height,
-            false);
-    }
+    obs_source_draw(
+        context->texture,
+        0,
+        0,
+        width,
+        height,
+        false);
 }
 
 obs_source_info makeInputHudSourceInfo()
@@ -2134,6 +2128,57 @@ obs_source_info makeInputHudSourceInfo()
 
 obs_source_info inputHudSourceInfo =
     makeInputHudSourceInfo();
+
+void anchorInputHudAtBottomLeft(
+    obs_sceneitem_t *item,
+    uint32_t sourceHeight)
+{
+    if (!item ||
+        obs_sceneitem_get_alignment(item) !=
+            (OBS_ALIGN_LEFT | OBS_ALIGN_TOP) ||
+        obs_sceneitem_get_bounds_type(item) !=
+            OBS_BOUNDS_NONE)
+        return;
+
+    // Existing scenes used a top-left anchor. Move the anchor to the
+    // current bottom edge before changing the source's rendered size.
+    struct vec2 pos;
+    struct vec2 scale;
+    obs_sceneitem_get_pos(item, &pos);
+    obs_sceneitem_get_scale(item, &scale);
+    pos.y += static_cast<float>(sourceHeight) * scale.y;
+
+    obs_sceneitem_defer_update_begin(item);
+    obs_sceneitem_set_alignment(
+        item,
+        OBS_ALIGN_LEFT | OBS_ALIGN_BOTTOM);
+    obs_sceneitem_set_pos(item, &pos);
+    obs_sceneitem_defer_update_end(item);
+}
+
+void anchorInputHudInAllScenes()
+{
+    obs_frontend_source_list scenes{};
+    obs_frontend_get_scenes(&scenes);
+    const uint32_t height =
+        inputHudSourceHeight(nullptr);
+
+    for (size_t i = 0; i < scenes.sources.num; ++i) {
+        obs_scene_t *scene =
+            obs_scene_from_source(
+                scenes.sources.array[i]);
+        if (!scene)
+            continue;
+
+        anchorInputHudAtBottomLeft(
+            obs_scene_find_source(
+                scene,
+                kInputHudSourceName),
+            height);
+    }
+
+    obs_frontend_source_list_free(&scenes);
+}
 
 bool applyInputHudVideoSource()
 {
@@ -2194,19 +2239,26 @@ bool applyInputHudVideoSource()
         return false;
     }
 
-    if (!item)
+    const bool newItem = !item;
+    if (newItem)
         item = obs_scene_add(
             scene,
             source);
 
     if (item) {
+        if (!newItem)
+            anchorInputHudAtBottomLeft(
+                item,
+                inputHudSourceHeight(nullptr));
+        obs_sceneitem_set_visible(
+            item,
+            g_inputHud->shown());
+    }
+
+    if (newItem && item) {
         obs_video_info videoInfo{};
         obs_get_video_info(
             &videoInfo);
-
-        const uint32_t sourceHeight =
-            inputHudSourceHeight(
-                nullptr);
 
         struct vec2 pos;
         pos.x = 22.0f;
@@ -2216,8 +2268,6 @@ bool applyInputHudVideoSource()
                     0,
                     static_cast<int>(
                         videoInfo.base_height) -
-                        static_cast<int>(
-                            sourceHeight) -
                         22));
 
         obs_sceneitem_set_pos(
@@ -2226,7 +2276,7 @@ bool applyInputHudVideoSource()
         obs_sceneitem_set_alignment(
             item,
             OBS_ALIGN_LEFT |
-                OBS_ALIGN_TOP);
+                OBS_ALIGN_BOTTOM);
 
         struct vec2 scale;
         scale.x = 1.0f;
@@ -3214,6 +3264,8 @@ static void ensure_hud()
 
         if (g_inputHud &&
             g_inputHud->enabled() &&
+            g_inputHud->shown() &&
+            g_inputHud->outputMode() != 1 &&
             !g_inputHud->isVisible()) {
             g_inputHud->show();
             g_inputHud->positionHud();
@@ -3258,6 +3310,7 @@ enum class HudHotkeyAction : int {
     PauseRecording,
     ToggleStreaming,
     ToggleGameBorderless,
+    ToggleInputHud,
     Count,
 };
 
@@ -3280,6 +3333,7 @@ static std::array<HudHotkeyDefinition, kHudHotkeyCount> g_hudHotkeys{{
     {"ClatashaHUD.PauseRecording", "Clatasha HUD: Pause/Resume Recording", "Pause/Resume Recording", "Recording"},
     {"ClatashaHUD.ToggleStreaming", "Clatasha HUD: Toggle Streaming", "Toggle Streaming", "Streaming"},
     {"ClatashaHUD.ToggleGameBorderless", "Clatasha HUD: Toggle Game Borderless Fullscreen", "Toggle Game Borderless Fullscreen", "Game Window"},
+    {"ClatashaHUD.ToggleInputHUD", "Clatasha HUD: Show/Hide Input HUD", "Show/Hide Input HUD", "Input HUD"},
 }};
 
 static QString hotkeyCombinationText(obs_key_combination_t combination)
@@ -3461,6 +3515,13 @@ static void runHotkeyActionOnUi(HudHotkeyAction action)
 
             case HudHotkeyAction::ToggleBrowserHudOverlays:
                 toggle_browser_hud_overlays();
+                break;
+
+            case HudHotkeyAction::ToggleInputHud:
+                if (g_inputHud) {
+                    g_inputHud->toggleShown();
+                    applyInputHudVideoSource();
+                }
                 break;
 
             case HudHotkeyAction::ToggleReplayBuffer:
@@ -5411,6 +5472,13 @@ static void show_settings()
                 QStringLiteral("%1%")
                     .arg(value));
             if (g_inputHud) {
+                // Preserve the bottom edge in every scene before the
+                // rendered source changes dimensions.
+                if (g_inputHud->enabled() &&
+                    g_inputHud->outputMode() != 0) {
+                    applyInputHudVideoSource();
+                    anchorInputHudInAllScenes();
+                }
                 g_inputHud->setScalePercent(
                     value);
             }
