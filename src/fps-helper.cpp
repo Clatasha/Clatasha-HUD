@@ -59,6 +59,7 @@ std::atomic<bool> gStopping{false};
 TRACEHANDLE gSession = 0;
 TRACEHANDLE gTrace = INVALID_PROCESSTRACE_HANDLE;
 HANDLE gDisplayCaptureSafeEvent = nullptr;
+HANDLE gHudHiddenEvent = nullptr;
 
 struct RateState {
     std::deque<std::pair<ULONGLONG, std::uint64_t>> samples;
@@ -893,6 +894,9 @@ void WriteStateFile(const std::wstring &path)
         IsFullscreenForegroundWindow(foreground);
     const bool displayCaptureSafe =
         DisplayCaptureSafeModeActive();
+    const bool hudHidden =
+        gHudHiddenEvent &&
+        WaitForSingleObject(gHudHiddenEvent, 0) == WAIT_OBJECT_0;
     const std::string foregroundRenderer =
         RendererTagForProcess(foregroundPid);
 
@@ -913,7 +917,17 @@ void WriteStateFile(const std::wstring &path)
             now,
             rendererUsesInjectedHud &&
                 foregroundFullscreen &&
-                !displayCaptureSafe);
+                !displayCaptureSafe &&
+                !hudHidden);
+
+    // Previously focused games may still have an armed hook. Hide all known
+    // injected renderers while continuing to collect FPS and other live data.
+    if (hudHidden) {
+        for (const auto &entry : gOpenGlInjectStatus) {
+            if (entry.first != foregroundPid)
+                ReadOpenGlSample(entry.first, now, false);
+        }
+    }
 
     bool foregroundWritten = false;
     std::map<DWORD, std::array<std::uint64_t, kPresentStreamCount>> counts;
@@ -1079,6 +1093,11 @@ int wmain(int argc, wchar_t **argv)
                 SYNCHRONIZE,
                 FALSE,
                 eventName);
+        swprintf_s(
+            eventName,
+            L"Local\\ClatashaHUD_Hidden_%lu",
+            parentPid);
+        gHudHiddenEvent = OpenEventW(SYNCHRONIZE, FALSE, eventName);
     }
 
     const std::wstring sessionName =
@@ -1129,6 +1148,11 @@ int wmain(int argc, wchar_t **argv)
     if (gDisplayCaptureSafeEvent) {
         CloseHandle(gDisplayCaptureSafeEvent);
         gDisplayCaptureSafeEvent = nullptr;
+    }
+
+    if (gHudHiddenEvent) {
+        CloseHandle(gHudHiddenEvent);
+        gHudHiddenEvent = nullptr;
     }
 
     DeleteFileW(statePath.c_str());
