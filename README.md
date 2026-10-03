@@ -73,23 +73,23 @@ Assign **Show/Hide Input HUD** in Clatasha HUD Settings → Hotkeys or OBS Setti
 
 ### Game display mode compatibility
 
-Clatasha HUD uses normal Windows desktop overlay windows for its private HUD and HUD browser overlays.
+Clatasha HUD uses Windows desktop overlay windows for the local status HUD, Input HUD, and browser HUD overlays.
 
-- **Windowed games** — supported.
-- **Borderless / borderless fullscreen games** — supported and recommended for the most reliable HUD overlay behavior.
-- **True exclusive fullscreen games** — may appear above normal desktop windows and prevent Clatasha HUD overlays from being visible.
+- **Windowed and borderless games** — use the desktop HUD, with Windows capture exclusion where supported.
+- **Exclusive fullscreen OpenGL and Direct3D 11 games** — the status HUD can render through an injected present hook. This in-game HUD can appear in recordings and streams. Support depends on the game and its rendering path.
+- **Other exclusive fullscreen renderers** — desktop overlays may be covered by the game. Use borderless mode if the HUD is not visible.
 
-Clatasha HUD periodically reasserts its HUD windows as topmost to recover their position when a game launches or changes focus. If a game still covers the HUD while running in exclusive fullscreen, switch that game to **Borderless** or **Borderless Fullscreen** mode.
+**Show/Hide HUD** controls both the desktop status HUD and the injected in-game status HUD. Input HUD and browser HUD overlays have their own visibility shortcuts.
 
-This limitation applies to the private desktop HUD overlays. It does not prevent `VIDEO` overlays from being rendered as normal OBS scene sources.
+The fullscreen status HUD support does not extend to Input HUD or browser HUD overlays. VIDEO overlays remain normal OBS scene sources regardless of the game's display mode.
 
 ## Game FPS backend
 
-Game/application FPS is collected by `clatasha-fps-helper.exe` using the Windows DXGI ETW provider. The helper is launched elevated because starting the ETW session normally requires suitable Windows tracing permissions.
+Game/application FPS is collected by `clatasha-fps-helper.exe` using the Windows DXGI ETW provider and injected OpenGL/Direct3D 11 present hooks. The helper is launched elevated because starting the ETW session normally requires suitable Windows tracing permissions.
 
 Current limitations:
 
-- The FPS path is DXGI-focused. Vulkan/OpenGL titles may show `--`.
+- Unsupported rendering paths, including some Vulkan titles, may show `--`.
 - The current target is the non-OBS foreground process.
 - A UAC prompt may appear when the helper starts.
 - The game FPS display intentionally holds the last valid sample briefly to prevent flicker during short ETW/state-file gaps.
@@ -113,6 +113,8 @@ data/
   obs-plugins/
     clatasha-hud/
       clatasha-fps-helper.exe
+      clatasha-opengl-present-hook.dll
+      clatasha-d3d11-present-hook.dll
       locale/
         en-US.ini
 ```
@@ -128,6 +130,8 @@ After extraction, the main files should be:
 ```text
 C:\Program Files\obs-studio\obs-plugins\64bit\clatasha-hud.dll
 C:\Program Files\obs-studio\data\obs-plugins\clatasha-hud\clatasha-fps-helper.exe
+C:\Program Files\obs-studio\data\obs-plugins\clatasha-hud\clatasha-opengl-present-hook.dll
+C:\Program Files\obs-studio\data\obs-plugins\clatasha-hud\clatasha-d3d11-present-hook.dll
 C:\Program Files\obs-studio\data\obs-plugins\clatasha-hud\locale\en-US.ini
 ```
 
