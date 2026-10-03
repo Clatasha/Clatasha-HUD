@@ -1,0 +1,104 @@
+name: Publish Clatasha HUD v0.3.2
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-v0.3.2.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+
+      - name: Verify version
+        shell: pwsh
+        run: |
+          $spec = Get-Content buildspec.json -Raw | ConvertFrom-Json
+          if ($spec.version -ne '0.3.2') {
+            throw "Expected version 0.3.2, found $($spec.version)"
+          }
+
+      - name: Configure
+        run: cmake --preset windows-x64
+
+      - name: Build
+        run: cmake --build --preset windows-x64
+
+      - name: Install staging files
+        run: cmake --install build_x64 --config RelWithDebInfo --prefix package
+
+      - name: Create OBS installation package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pluginRoot = 'package/clatasha-hud'
+          $dist = 'dist'
+          New-Item -ItemType Directory -Force "$dist/obs-plugins/64bit" | Out-Null
+          New-Item -ItemType Directory -Force "$dist/data/obs-plugins/clatasha-hud/locale" | Out-Null
+
+          Copy-Item "$pluginRoot/bin/64bit/clatasha-hud.dll" "$dist/obs-plugins/64bit/clatasha-hud.dll"
+          Copy-Item "$pluginRoot/data/clatasha-fps-helper.exe" "$dist/data/obs-plugins/clatasha-hud/clatasha-fps-helper.exe"
+          Copy-Item "$pluginRoot/data/clatasha-opengl-present-hook.dll" "$dist/data/obs-plugins/clatasha-hud/clatasha-opengl-present-hook.dll"
+          Copy-Item "$pluginRoot/data/clatasha-d3d11-present-hook.dll" "$dist/data/obs-plugins/clatasha-hud/clatasha-d3d11-present-hook.dll"
+          Copy-Item "$pluginRoot/data/locale/en-US.ini" "$dist/data/obs-plugins/clatasha-hud/locale/en-US.ini"
+
+          $required = @(
+            "$dist/obs-plugins/64bit/clatasha-hud.dll",
+            "$dist/data/obs-plugins/clatasha-hud/clatasha-fps-helper.exe",
+            "$dist/data/obs-plugins/clatasha-hud/clatasha-opengl-present-hook.dll",
+            "$dist/data/obs-plugins/clatasha-hud/clatasha-d3d11-present-hook.dll",
+            "$dist/data/obs-plugins/clatasha-hud/locale/en-US.ini"
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path $file)) { throw "Missing packaged file: $file" }
+          }
+
+          Compress-Archive -Path "$dist/*" -DestinationPath 'Clatasha-HUD-OBS-0.3.2-Windows-x64.zip' -Force
+
+      - name: Write release notes
+        shell: pwsh
+        run: |
+          @'
+          ## Clatasha HUD 0.3.2
+
+          This patch fixes the status HUD visibility control in fullscreen games.
+
+          ### Fixes
+          - Show/Hide HUD now hides both the desktop status HUD and the injected in-game status HUD for OpenGL and Direct3D 11.
+          - Hooks in previously focused games are also hidden. Showing the HUD restores it in the focused supported fullscreen game.
+          - FPS sampling continues while the HUD is hidden.
+          - Updated fullscreen compatibility and installation documentation.
+
+          ### Known follow-ups
+          - Issue #2 reports that hotkey assignments can revert after restarting OBS. This report is still open and is not addressed by this patch.
+          - Configurable HUD visibility at OBS startup remains a requested feature.
+
+          ### Requirements
+          - Windows 10 or Windows 11 x64.
+          - OBS Studio with Browser Source/obs-browser installed and enabled for browser overlays.
+          - Tested with OBS Studio 32.2.2.
+
+          ### Installation
+          1. Close OBS Studio.
+          2. Extract **Clatasha-HUD-OBS-0.3.2-Windows-x64.zip** directly into the OBS installation directory, normally `C:\Program Files\obs-studio`.
+          3. Replace existing Clatasha HUD files when prompted and restart OBS Studio.
+          4. Open Clatasha HUD from the **Tools** menu.
+
+          The desktop HUD is capture-excluded where supported. The injected fullscreen status HUD can appear in recordings and streams. Input HUD VIDEO and BOTH modes include an OBS scene source.
+          '@ | Set-Content -Path 'release-notes.md' -Encoding UTF8
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create 'v0.3.2' 'Clatasha-HUD-OBS-0.3.2-Windows-x64.zip#Windows x64 OBS installation package' `
+            --repo '${{ github.repository }}' `
+            --target '${{ github.sha }}' `
+            --title 'Clatasha HUD - OBS Status Overlay 0.3.2' `
+            --notes-file 'release-notes.md'

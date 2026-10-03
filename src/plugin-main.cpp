@@ -94,6 +94,7 @@ static bool g_browserHudOverlaysWantedVisible = true;
 
 #ifdef Q_OS_WIN
 static HANDLE g_displayCaptureSafeEvent = nullptr;
+static HANDLE g_hudHiddenEvent = nullptr;
 static bool g_displayCaptureSafeActive = false;
 static bool g_displayCaptureSafeModeEnabled = false;
 #endif
@@ -3285,11 +3286,24 @@ static void ensure_hud()
     });
 }
 
+static void setHudWantedVisible(bool visible)
+{
+    g_hudWantedVisible = visible;
+#ifdef Q_OS_WIN
+    if (g_hudHiddenEvent) {
+        if (visible)
+            ResetEvent(g_hudHiddenEvent);
+        else
+            SetEvent(g_hudHiddenEvent);
+    }
+#endif
+}
+
 static void toggle_hud()
 {
     ensure_hud();
 
-    g_hudWantedVisible = !g_hudWantedVisible;
+    setHudWantedVisible(!g_hudWantedVisible);
 
     if (!g_hudWantedVisible) {
         g_hud->hide();
@@ -6172,7 +6186,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 {
     switch (event) {
     case OBS_FRONTEND_EVENT_FINISHED_LOADING:
-        g_hudWantedVisible = true;
+        setHudWantedVisible(true);
         ensure_hud();
         enforceGameCaptureHudExclusion();
         updateDisplayCaptureSafeMode();
@@ -6210,7 +6224,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
         g_frontendExiting = true;
         stopTopmostEventHooks();
         shutdownUpdateChecker();
-        g_hudWantedVisible = false;
+        setHudWantedVisible(false);
         destroyHudOverlays();
 
         if (g_inputHud) {
@@ -6245,6 +6259,21 @@ bool obs_module_load(void)
             eventName,
             L"Local\\ClatashaHUD_DisplayCaptureSafe_%lu",
             GetCurrentProcessId());
+        // The injected HUD runs outside OBS, so QWidget visibility alone
+        // cannot hide it. Share the user's Show/Hide HUD state with the helper.
+        wchar_t hiddenEventName[96] = {};
+        swprintf_s(
+            hiddenEventName,
+            L"Local\\ClatashaHUD_Hidden_%lu",
+            GetCurrentProcessId());
+        g_hudHiddenEvent = CreateEventW(
+            nullptr, TRUE, !g_hudWantedVisible, hiddenEventName);
+        if (!g_hudHiddenEvent) {
+            blog(
+                LOG_WARNING,
+                "[Clatasha HUD] Could not create HUD visibility event: %lu",
+                GetLastError());
+        }
         g_displayCaptureSafeEvent =
             CreateEventW(
                 nullptr,
@@ -6293,7 +6322,7 @@ void obs_module_unload(void)
     }
     g_displayCaptureSafeActive = false;
 #endif
-    g_hudWantedVisible = false;
+    setHudWantedVisible(false);
     g_frontendExiting = true;
 
     stopTopmostEventHooks();
@@ -6327,6 +6356,13 @@ void obs_module_unload(void)
         delete g_hud;
         g_hud = nullptr;
     }
+
+#ifdef Q_OS_WIN
+    if (g_hudHiddenEvent) {
+        CloseHandle(g_hudHiddenEvent);
+        g_hudHiddenEvent = nullptr;
+    }
+#endif
 
     blog(LOG_INFO, "[Clatasha HUD] Plugin unloaded");
 }
