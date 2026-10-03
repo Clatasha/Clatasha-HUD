@@ -3599,15 +3599,22 @@ static void saveHudHotkeys()
     if (path.isEmpty())
         return;
 
+    // OBS destroys its hotkey registry before unloading modules. A missing
+    // hotkey must never overwrite the last saved bindings with an empty key.
+    QDir().mkpath(QFileInfo(path).absolutePath());
     QSettings settings(path, QSettings::IniFormat);
     for (int i = 0; i < kHudHotkeyCount; ++i) {
-        const obs_key_combination_t combination =
-            currentHotkeyBinding(g_hudHotkeys[i].id);
+        obs_data_array_t *bindings = obs_hotkey_save(g_hudHotkeys[i].id);
+        if (!bindings)
+            continue;
+
+        obs_data_t *data = obs_data_create();
+        obs_data_set_array(data, "bindings", bindings);
         const QString prefix = QStringLiteral("hotkeys/%1/").arg(i);
-        settings.setValue(prefix + QStringLiteral("key"),
-                          static_cast<int>(combination.key));
-        settings.setValue(prefix + QStringLiteral("modifiers"),
-                          static_cast<qulonglong>(combination.modifiers));
+        settings.setValue(prefix + QStringLiteral("bindings"),
+                          QString::fromUtf8(obs_data_get_json(data)));
+        obs_data_release(data);
+        obs_data_array_release(bindings);
     }
     settings.sync();
 }
@@ -3621,6 +3628,23 @@ static void loadHudHotkeys()
     QSettings settings(path, QSettings::IniFormat);
     for (int i = 0; i < kHudHotkeyCount; ++i) {
         const QString prefix = QStringLiteral("hotkeys/%1/").arg(i);
+        if (settings.contains(prefix + QStringLiteral("bindings"))) {
+            const QByteArray json =
+                settings.value(prefix + QStringLiteral("bindings")).toString().toUtf8();
+            obs_data_t *data = obs_data_create_from_json(json.constData());
+            if (data) {
+                obs_data_array_t *bindings = obs_data_get_array(data, "bindings");
+                if (bindings) {
+                    obs_hotkey_load(g_hudHotkeys[i].id, bindings);
+                    obs_data_array_release(bindings);
+                    obs_data_release(data);
+                    continue;
+                }
+                obs_data_release(data);
+            }
+        }
+
+        // Migrate shortcuts saved by versions through 0.3.2.
         if (!settings.contains(prefix + QStringLiteral("key")))
             continue;
 
@@ -6220,6 +6244,9 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
         break;
 
     case OBS_FRONTEND_EVENT_EXIT:
+        // Save before obs_shutdown clears frontend hotkeys. Module unload is
+        // too late to query them, including edits made in OBS Settings.
+        saveHudHotkeys();
         restoreGameBorderlessWindow();
         g_frontendExiting = true;
         stopTopmostEventHooks();
